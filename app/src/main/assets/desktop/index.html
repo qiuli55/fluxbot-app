@@ -93,6 +93,27 @@
     pointer-events: none; text-align: center;
   }
   #hint.show { opacity: 1; }
+  /* 全屏后原生标题栏隐藏，这里提供一个退出入口 */
+  #exitfs {
+    position: absolute; right: 12px; top: 56px; z-index: 24;
+    display: none; padding: 8px 14px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.16); background: rgba(12,14,20,.82);
+    color: #cfd4de; font-size: 12.5px; backdrop-filter: blur(8px);
+  }
+  #exitfs.show { display: block; }
+  #viewbar {
+    position: absolute; right: 12px;
+    bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 21;
+    display: none; gap: 6px;
+  }
+  #viewbar.show { display: flex; }
+  #viewbar button {
+    min-width: 42px; height: 36px; padding: 0 10px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,.12); background: rgba(12,14,20,.8);
+    color: #e8eaef; font-size: 12.5px; backdrop-filter: blur(8px);
+  }
+  /* 接管后底部工具条出现，缩放条上移让位 */
+  #tools.show ~ #viewbar { bottom: calc(112px + env(safe-area-inset-bottom)); }
 </style>
 </head>
 <body>
@@ -117,10 +138,21 @@
     <button data-k="0xff0d">Enter</button>
     <button data-k="0xff08">⌫</button>
     <button id="kb">键盘</button>
+    <button id="rc">右键</button>
+    <button id="paste">粘贴</button>
+    <button id="rot">横屏</button>
+    <button id="fs">全屏</button>
     <button id="fit">适配</button>
   </div>
 </div>
+<!-- 缩放条：观看也能放大看细节，不依赖接管 -->
+<div id="viewbar">
+  <button id="zo">−</button>
+  <button id="zv">100%</button>
+  <button id="zi">＋</button>
+</div>
 <div id="hint"></div>
+<button id="exitfs">退出全屏</button>
 <input id="kbd" inputmode="text">
 
 <script src="novnc.bundle.js"></script>
@@ -147,6 +179,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var statusEl = $('status'), controlEl = $('control'), toolsEl = $('tools');
   var hintEl = $('hint'), textEl = $('text'), sendbarEl = $('sendbar'), kbdEl = $('kbd');
+  var viewbarEl = $('viewbar');
   var loadingEl = $('loading'), loadingTextEl = $('loadingText');
 
   /* loading 由上下文决定：连接中/重连中显示，连上或报错隐藏 */
@@ -170,6 +203,11 @@
   var mods = {};  // keysym -> true while held
   var hintTimer = null;
   var dispMsgs = 0, dispBytes = 0;
+  /* 放大/平移：靠放大 #screen 的布局尺寸让 noVNC 重新适配（不能用 CSS transform，
+     否则 getBoundingClientRect 变大，_scale 跟着变，点击坐标会算错）。 */
+  var ZOOMS = [1, 1.5, 2, 3];
+  var zi = 0, panX = 0, panY = 0;
+  var fullscreenOn = false, landscapeOn = false;
 
   /* 统计画面 WebSocket 收到的消息：判断「帧没来」还是「来了没画上」 */
   (function wrapWs() {
@@ -279,11 +317,103 @@
     }
     return r;
   }
+  function viewportBox() {
+    var w = Math.round(window.innerWidth), h = Math.round(window.innerHeight);
+    return { w: w, h: h, ok: w > 1 && h > 1 };
+  }
+  /* 把当前缩放/平移写进 #screen 的布局尺寸与左上角位置。
+     放大时 #screen 比窗口大，noVNC 会按更大的容器重新适配，画面自然变大；平移只改 left/top。 */
+  function applyView() {
+    var el = $('screen');
+    if (!el) return;
+    var b = viewportBox();
+    if (!b.ok) return;
+    var z = ZOOMS[zi];
+    el.style.right = 'auto'; el.style.bottom = 'auto';
+    if (z <= 1.001) {
+      zi = 0; panX = 0; panY = 0;
+      if (rfb) { try { rfb.dragViewport = false; } catch (e) {} }
+      el.style.left = '0px'; el.style.top = '0px';
+      el.style.width = b.w + 'px'; el.style.height = b.h + 'px';
+    } else {
+      var w = Math.round(b.w * z), h = Math.round(b.h * z);
+      var minX = b.w - w, minY = b.h - h;
+      if (panX > 0) panX = 0;
+      if (panY > 0) panY = 0;
+      if (panX < minX) panX = minX;
+      if (panY < minY) panY = minY;
+      /* 放大时把拖动交给本地平移，别把拖动当远程拖拽发过去（点按/长按仍会发） */
+      if (rfb) { try { rfb.dragViewport = true; } catch (e) {} }
+      el.style.left = Math.round(panX) + 'px';
+      el.style.top = Math.round(panY) + 'px';
+      el.style.width = w + 'px'; el.style.height = h + 'px';
+    }
+    var zv = $('zv');
+    if (zv) zv.textContent = Math.round(z * 100) + '%';
+  }
+  function setZoom(next) {
+    next = Math.max(0, Math.min(ZOOMS.length - 1, next));
+    if (next === zi) {
+      if (next === 0) hint('已经是适配大小');
+      else hint('放大 ' + Math.round(ZOOMS[zi] * 100) + '%（单指拖动画面）');
+      return;
+    }
+    var keepX = 0, keepY = 0;
+    var b = viewportBox();
+    var oz = ZOOMS[zi];
+    if (b.ok && oz > 1.001) {
+      // 保持当前视口中心指向的点不跳
+      keepX = (b.w / 2 - panX) / oz;
+      keepY = (b.h / 2 - panY) / oz;
+    }
+    zi = next;
+    var z = ZOOMS[zi];
+    if (z > 1.001) {
+      panX = b.ok ? Math.round(b.w / 2 - keepX * z) : 0;
+      panY = b.ok ? Math.round(b.h / 2 - keepY * z) : 0;
+    } else {
+      panX = 0; panY = 0;
+    }
+    refit('缩放');
+    hint(z <= 1.001 ? '已适配屏幕' : '放大 ' + Math.round(z * 100) + '%（单指拖动画面）');
+  }
+  /* 放大状态下单指拖动平移。noVNC 在手势层会 stopPropagation，
+     所以必须挂在捕获阶段才能先拿到事件。 */
+  (function panSetup() {
+    var el = $('screen');
+    var active = false, pid = -1, sx = 0, sy = 0, ox = 0, oy = 0;
+    function findTouch(list) {
+      for (var i = 0; i < list.length; i++) if (list[i].identifier === pid) return list[i];
+      return null;
+    }
+    el.addEventListener('touchstart', function (ev) {
+      if (ZOOMS[zi] <= 1.001 || ev.touches.length !== 1) { active = false; return; }
+      var t = ev.touches[0];
+      active = true; pid = t.identifier;
+      sx = t.clientX; sy = t.clientY; ox = panX; oy = panY;
+    }, true);
+    el.addEventListener('touchmove', function (ev) {
+      if (!active) return;
+      var t = findTouch(ev.touches);
+      if (!t) return;
+      panX = ox + (t.clientX - sx);
+      panY = oy + (t.clientY - sy);
+      applyView();
+      ev.preventDefault();
+    }, true);
+    el.addEventListener('touchend', function (ev) {
+      if (!findTouch(ev.touches)) active = false;
+    }, true);
+    el.addEventListener('touchcancel', function () { active = false; }, true);
+  })();
+
   function refit(reason) {
     if (!rfb || closing) return;
-    var r = screenBox();
+    applyView();                                    // 先摆好容器尺寸/位置，再让 noVNC 重新适配
     try { rfb.scaleViewport = true; } catch (e) {}   // setter 内部会 _updateScale()
     try { if (rfb._updateScale) rfb._updateScale(); } catch (e) {}
+    applyView();                                    // 尺寸边界可能变了，再收敛一次
+    var r = screenBox();
     var c = document.querySelector('#screen canvas');
     var w = c ? c.style.width : '-';
     if (reason || w === '0px' || !w) {
@@ -292,7 +422,8 @@
         lastRefitLog = now;
         log('重算缩放(' + (reason || '看门狗') + ') 容器=' +
           (r ? (Math.round(r.width) + 'x' + Math.round(r.height)) : '无') +
-          ' 窗口=' + window.innerWidth + 'x' + window.innerHeight + ' css=' + w);
+          ' 窗口=' + window.innerWidth + 'x' + window.innerHeight +
+          ' 缩放=' + Math.round(ZOOMS[zi] * 100) + '% css=' + w);
       }
     }
   }
@@ -330,6 +461,7 @@
     controlEl.textContent = viewOnly ? '接管' : '交还';
     controlEl.className = viewOnly ? '' : 'on';
     toolsEl.classList.toggle('show', !viewOnly);
+    viewbarEl.classList.toggle('show', !!rfb);
     post({ phase: 'ready', text: viewOnly ? '观看中' : '已接管', control: !viewOnly });
   }
 
@@ -357,6 +489,7 @@
       try { w.close(); } catch (e) {}
     }
     mods = {};
+    viewbarEl.classList.remove('show');
   }
   function scheduleReconnect(reason) {
     if (closing || retryTimer) return;
@@ -494,6 +627,15 @@
         self.clipViewport = false;
         self.resizeSession = false;
         self.viewOnly = viewOnly;
+        /* 桌面复制 → 手机剪贴板（noVNC 在 viewOnly 时不派发该事件，所以接管后才有） */
+        self.addEventListener('clipboard', function (ev) {
+          var text = ev && ev.detail && ev.detail.text;
+          if (!text) return;
+          try {
+            if (window.FluxHost && FluxHost.setClipboard) FluxHost.setClipboard(String(text));
+          } catch (e) {}
+          hint('桌面剪贴板已同步到手机');
+        });
         var settled = false;
         var settle = function (fn, arg) { if (!settled) { settled = true; fn(arg); } };
         self.addEventListener('connect', function () {
@@ -676,7 +818,11 @@
   $('kb').addEventListener('click', function () {
     if (viewOnly) { hint('先点「接管」'); return; }
     sendbarEl.classList.toggle('show');
-    if (sendbarEl.classList.contains('show')) { textEl.focus(); kbdEl.focus(); }
+    if (sendbarEl.classList.contains('show')) {
+      textEl.focus(); kbdEl.focus();
+      /* 部分 WebView 里页面内 focus 拉不起软键盘，交给原生强制弹一次 */
+      try { if (window.FluxHost && FluxHost.showKeyboard) FluxHost.showKeyboard(); } catch (e) {}
+    }
   });
   $('send').addEventListener('click', function () {
     if (textEl.value) { sendText(textEl.value); textEl.value = ''; }
@@ -689,13 +835,68 @@
   });
   $('fit').addEventListener('click', function () {
     if (!rfb) return;
+    zi = 0; panX = 0; panY = 0;
     refit('手动适配');
     hint('已适配屏幕');
   });
-  window.addEventListener('resize', function () { refit('窗口变化'); sizeLoading(); });
-  window.addEventListener('orientationchange', function () { setTimeout(function () { refit('旋转'); }, 400); });
+  $('zi').addEventListener('click', function () { setZoom(zi + 1); });
+  $('zo').addEventListener('click', function () { setZoom(zi - 1); });
+  $('zv').addEventListener('click', function () { setZoom(0); });
+  /* 右键：发到当前可见区域的中心 */
+  $('rc').addEventListener('click', function () {
+    if (!rfb || viewOnly) { hint('先点「接管」'); return; }
+    var c = document.querySelector('#screen canvas');
+    if (!c) return;
+    var r = c.getBoundingClientRect();
+    var x = Math.round(window.innerWidth / 2 - r.left);
+    var y = Math.round(window.innerHeight / 2 - r.top);
+    if (x < 0 || y < 0 || x > r.width || y > r.height) { hint('画面中心不在可见区域'); return; }
+    try {
+      rfb._handleMouseButton(x, y, true, 4);
+      rfb._handleMouseButton(x, y, false, 4);
+      hint('已发送右键');
+    } catch (e) { hint('右键失败'); }
+  });
+  /* 手机剪贴板 → 桌面 */
+  $('paste').addEventListener('click', function () {
+    if (!rfb || viewOnly) { hint('先点「接管」'); return; }
+    var text = '';
+    try { if (window.FluxHost && FluxHost.getClipboard) text = FluxHost.getClipboard() || ''; } catch (e) {}
+    if (!text) { hint('手机剪贴板是空的'); return; }
+    rfb.clipboardPasteFrom(String(text));
+    hint('已放进桌面剪贴板，在桌面里 Ctrl+V 粘贴');
+  });
+  /* 横屏 / 全屏交给原生处理，布局变完再重算画面 */
+  $('rot').addEventListener('click', function () {
+    landscapeOn = !landscapeOn;
+    $('rot').textContent = landscapeOn ? '竖屏' : '横屏';
+    try { if (window.FluxHost && FluxHost.setLandscape) FluxHost.setLandscape(landscapeOn ? 1 : 0); } catch (e) {}
+    setTimeout(function () { refit('旋转'); }, 500);
+    setTimeout(function () { refit('旋转2'); }, 1100);
+  });
+  function setFullscreenUI(on) {
+    fullscreenOn = on;
+    var fs = $('fs'), ex = $('exitfs');
+    if (fs) fs.textContent = on ? '退出全屏' : '全屏';
+    if (ex) ex.classList.toggle('show', on);
+  }
+  function sendFullscreen(on) {
+    try { if (window.FluxHost && FluxHost.setFullscreen) FluxHost.setFullscreen(on ? 1 : 0); } catch (e) {}
+    setTimeout(function () { refit('全屏'); }, 400);
+    setTimeout(function () { refit('全屏2'); }, 1000);
+  }
+  $('fs').addEventListener('click', function () {
+    setFullscreenUI(!fullscreenOn);
+    sendFullscreen(fullscreenOn);
+  });
+  $('exitfs').addEventListener('click', function () {
+    setFullscreenUI(false);
+    sendFullscreen(false);
+  });
+  window.addEventListener('resize', function () { applyView(); refit('窗口变化'); sizeLoading(); });
+  window.addEventListener('orientationchange', function () { setTimeout(function () { applyView(); refit('旋转'); }, 400); });
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', function () { refit('视口变化'); });
+    window.visualViewport.addEventListener('resize', function () { applyView(); refit('视口变化'); });
   }
   window.addEventListener('beforeunload', function () { window.Flux.disconnect(); });
   window.addEventListener('pagehide', function () { window.Flux.disconnect(); });
@@ -737,6 +938,9 @@
     if (r.width < 2 || r.height < 2) refit(null);
   }, 1200);
 
+  /* 首帧就把 #screen 的尺寸/位置写成 px（ZOOMS 到这里已初始化） */
+  applyView();
+
   /* ---------------- native entry points ---------------- */
   window.Flux = {
     connect: function (host, token, profile, bridge, bridgeKey) {
@@ -750,6 +954,8 @@
     },
     takeover: takeover,
     release: release,
+    /* 原生布局变化（横屏/全屏/键盘）后主动重算画面 */
+    refit: function () { refit('原生通知'); },
     /* 原生探测结果（DNS/TCP/HTTPS）只进日志，不再显示在屏幕上 */
     diag: function (text) { log(String(text)); },
     /* 原生 HTTP 回调（见 FluxNet.request） */

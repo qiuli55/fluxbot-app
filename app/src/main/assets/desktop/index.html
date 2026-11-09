@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Bot 桌面</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0b0d12; overflow: hidden;
+    font: 13px/1.4 -apple-system, "Noto Sans SC", system-ui, sans-serif;
+    color: #e8eaef;
+  }
+  /* 不用 inset：部分 WebView 不支持，绝对定位元素会退化成 0 尺寸，
+     noVNC 的 autoscale 就会算出 scale=0（画布 css 0px，屏幕全黑）。 */
+  #screen {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    width: 100%; height: 100%;
+  }
+  #screen canvas { image-rendering: auto; }
+
+  .pill {
+    position: absolute; left: 12px; top: 12px; z-index: 20;
+    max-width: 62%;
+    padding: 6px 12px; border-radius: 999px;
+    background: rgba(12, 14, 20, .78);
+    border: 1px solid rgba(255, 255, 255, .10);
+    color: #cfd4de; font-size: 12px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    backdrop-filter: blur(8px);
+  }
+  .pill.ok { color: #7fe0a8; border-color: rgba(127, 224, 168, .3); }
+  .pill.err { color: #ff8f8f; border-color: rgba(255, 143, 143, .34); }
+
+  /* 居中连接动画：画面未就绪时显示，连上就隐藏 */
+  #loading {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; z-index: 18; pointer-events: none;
+  }
+  #loading.hide { display: none; }
+  .spin {
+    width: 38px; height: 38px; border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, .13);
+    border-top-color: #5b8cff;
+    animation: spin .9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loadingText { font-size: 12.5px; color: #9aa3b2; }
+
+  #control {
+    position: absolute; right: 12px; top: 10px; z-index: 21;
+    padding: 8px 16px; border-radius: 999px; border: 0;
+    background: #2f6df6; color: #fff; font-size: 12.5px; font-weight: 600;
+    box-shadow: 0 6px 18px rgba(47, 109, 246, .34);
+  }
+  #control.on { background: rgba(12, 14, 20, .8); border: 1px solid rgba(255,255,255,.16); color: #cfd4de; box-shadow: none; }
+
+  #tools {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 22;
+    display: none; flex-direction: column; gap: 8px;
+    padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(8, 10, 14, .94), rgba(8, 10, 14, .0));
+  }
+  #tools.show { display: flex; }
+  #keys { display: flex; gap: 6px; overflow-x: auto; }
+  #keys button, #sendbar button, #tools > button {
+    flex: 0 0 auto;
+    min-width: 42px; height: 36px; padding: 0 11px;
+    border-radius: 10px; border: 1px solid rgba(255,255,255,.12);
+    background: rgba(30, 34, 43, .92); color: #e8eaef;
+    font-size: 12.5px;
+  }
+  #keys button.active { background: #2f6df6; border-color: #2f6df6; color: #fff; }
+  #sendbar { display: none; gap: 6px; }
+  #sendbar.show { display: flex; }
+  #text {
+    flex: 1 1 auto; height: 36px; padding: 0 12px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,.14); background: rgba(20, 23, 30, .95);
+    color: #e8eaef; font-size: 14px; outline: none;
+  }
+  #kbd { position: fixed; left: -9999px; top: 0; width: 10px; height: 10px; opacity: 0; }
+  #hint {
+    position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%);
+    z-index: 23; max-width: 86%; padding: 8px 14px; border-radius: 10px;
+    background: rgba(12,14,20,.92); border: 1px solid rgba(255,255,255,.12);
+    font-size: 12px; color: #cfd4de; opacity: 0; transition: opacity .2s;
+    pointer-events: none; text-align: center;
+  }
+  #hint.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<div id="loading"><div class="spin"></div><div id="loadingText">正在连接…</div></div>
+<div id="status" class="pill">未连接</div>
+<button id="control">接管</button>
+<div id="tools">
+  <div id="sendbar">
+    <input id="text" placeholder="输入文字后点发送" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="send">发送</button>
+  </div>
+  <div id="keys">
+    <button data-k="0xff1b">Esc</button>
+    <button data-k="0xff09">Tab</button>
+    <button data-mod="0xffe3">Ctrl</button>
+    <button data-mod="0xffe9">Alt</button>
+    <button data-k="0xff51">←</button>
+    <button data-k="0xff52">↑</button>
+    <button data-k="0xff53">→</button>
+    <button data-k="0xff54">↓</button>
+    <button data-k="0xff0d">Enter</button>
+    <button data-k="0xff08">⌫</button>
+    <button id="kb">键盘</button>
+    <button id="fit">适配</button>
+  </div>
+</div>
+<div id="hint"></div>
+<input id="kbd" inputmode="text">
+
+<script src="novnc.bundle.js"></script>
+<script>
+(function () {
+  'use strict';
+  /* 有些 Android WebView（尤其应用分身/分应用环境）在前台也把页面报成 hidden，
+     Chromium 会因此暂停合成，noVNC 的画面就永远上不了屏。这里强制按可见处理。 */
+  (function visibilityFix() {
+    function def(name, value) {
+      try {
+        Object.defineProperty(Document.prototype, name, {
+          configurable: true,
+          get: function () { return value; }
+        });
+      } catch (e) {}
+    }
+    def('hidden', false);
+    def('visibilityState', 'visible');
+    def('webkitHidden', false);
+    def('webkitVisibilityState', 'visible');
+  })();
+
+  var $ = function (id) { return document.getElementById(id); };
+  var statusEl = $('status'), controlEl = $('control'), toolsEl = $('tools');
+  var hintEl = $('hint'), textEl = $('text'), sendbarEl = $('sendbar'), kbdEl = $('kbd');
+  var loadingEl = $('loading'), loadingTextEl = $('loadingText');
+
+  /* loading 由上下文决定：连接中/重连中显示，连上或报错隐藏 */
+  function setLoading(show, text) {
+    loadingEl.classList.toggle('hide', !show);
+    if (show && text) loadingTextEl.textContent = text;
+  }
+
+  var ctx = null, ws = null, rfb = null, viewerId = null;
+  var seq = 0, pending = {}, lease = false, viewOnly = true, closing = false;
+  var retry = 0, retryTimer = null, busy = false;
+  var mods = {};  // keysym -> true while held
+  var hintTimer = null;
+  var dispMsgs = 0, dispBytes = 0;
+
+  /* 统计画面 WebSocket 收到的消息：判断「帧没来」还是「来了没画上」 */
+  (function wrapWs() {
+    var WS = window.WebSocket;
+    if (typeof WS !== 'function') return;
+    function Wrapped(url, protocols) {
+      var sock = protocols ? new WS(url, protocols) : new WS(url);
+      if (String(url).indexOf('/api/display/ws') >= 0) {
+        dispMsgs = 0;
+        dispBytes = 0;
+        sock.addEventListener('message', function (ev) {
+          dispMsgs++;
+          var d = ev.data;
+          dispBytes += (d && (d.byteLength || d.length)) || 0;
+        });
+      }
+      return sock;
+    }
+    Wrapped.prototype = WS.prototype;
+    Wrapped.CONNECTING = WS.CONNECTING;
+    Wrapped.OPEN = WS.OPEN;
+    Wrapped.CLOSING = WS.CLOSING;
+    Wrapped.CLOSED = WS.CLOSED;
+    window.WebSocket = Wrapped;
+  })();
+
+  function post(state) {
+    try { if (window.FluxHost) FluxHost.onState(JSON.stringify(state)); } catch (e) {}
+  }
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.className = 'pill' + (kind ? ' ' + kind : '');
+    // 连接中/重连中显示居中动画；连上、出错、已断开都收起
+    setLoading(!kind && text.indexOf('断开') < 0 && text.indexOf('中断') < 0, text);
+  }
+  /* 日志走两条路：原生（HttpURLConnection 上报）、bridge /log */
+  function log(text, kind) {
+    try { if (window.FluxHost && FluxHost.onLog) FluxHost.onLog(String(text)); } catch (e) {}
+    try {
+      if (!ctx || !ctx.bridge) return;
+      var logUrl = ctx.bridge + '/log?key=' + encodeURIComponent(ctx.bridgeKey) +
+        '&tag=' + encodeURIComponent(ctx.profile);
+      if (window.FluxNet && FluxNet.request) {
+        nativeHttp('POST', logUrl, String(text)).catch(function () {});
+        return;
+      }
+      fetch(logUrl, { method: 'POST', mode: 'cors', keepalive: true, body: String(text) }).catch(function () {});
+    } catch (e) {}
+  }
+  /* ---------------- 画面自检：区分「没画上」和「画上了但没上屏」 ---------------- */
+  function sampleCanvas(canvas) {
+    if (!canvas) return { w: 0, h: 0, nb: 0, total: 0, err: '无画布' };
+    var w = canvas.width, h = canvas.height;
+    if (!w || !h) return { w: w, h: h, nb: 0, total: 0, err: '尺寸0' };
+    try {
+      var data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+      var sx = Math.max(1, Math.floor(w / 64)), sy = Math.max(1, Math.floor(h / 64));
+      var nb = 0, total = 0;
+      for (var y = 0; y < h; y += sy) {
+        for (var x = 0; x < w; x += sx) {
+          var i = (y * w + x) * 4;
+          total++;
+          if (data[i] > 6 || data[i + 1] > 6 || data[i + 2] > 6) nb++;
+        }
+      }
+      return { w: w, h: h, nb: nb, total: total };
+    } catch (e) {
+      return { w: w, h: h, nb: 0, total: 0, err: (e && e.message) || '读取失败' };
+    }
+  }
+  function probeCanvas(tag) {
+    if (closing) return;
+    var canvas = document.querySelector('#screen canvas');
+    var d = rfb && rfb._display;
+    var t = sampleCanvas(canvas), b = sampleCanvas(d && d._backbuffer);
+    var rect = canvas ? canvas.getBoundingClientRect() : null;
+    var css = canvas ? ((canvas.style.width || '-') + 'x' + (canvas.style.height || '-')) : '-';
+    var box = rect ? (Math.round(rect.width) + 'x' + Math.round(rect.height)) : '-';
+    var vp = (d && d._viewportLoc) ? (d._viewportLoc.w + 'x' + d._viewportLoc.h) : '-';
+    var top = '?';
+    try {
+      var el = document.elementFromPoint(Math.round(innerWidth / 2), Math.round(innerHeight / 2));
+      top = el ? (el.tagName + (el.id ? '#' + el.id : '')) : '空';
+    } catch (e) {}
+    log(tag + ' 画布 ' + t.w + 'x' + t.h + ' 亮=' + t.nb + '/' + t.total +
+      ' 背板=' + b.nb + '/' + b.total + ' 视口=' + vp + ' css=' + css +
+      ' 显示=' + box + ' 顶层=' + top + ' 可见=' + document.visibilityState +
+      ' 帧=' + dispMsgs + '/' + Math.round(dispBytes / 1024) + 'KB' +
+      (t.err ? ' 读错=' + t.err : ''));
+  }
+
+  /* 有些 WebView 里 #screen 量出来是 0（inset 兼容性/布局时机），
+     noVNC 会据此把画布缩放成 0。这里兜底：量不到尺寸就用窗口尺寸补上，再强制重算缩放。 */
+  function screenBox() {
+    var box = $('screen');
+    if (!box) return null;
+    var r = box.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) {
+      var w = Math.round(window.innerWidth), h = Math.round(window.innerHeight);
+      if (w > 1 && h > 1) {
+        box.style.position = 'absolute';
+        box.style.left = '0'; box.style.top = '0';
+        box.style.right = 'auto'; box.style.bottom = 'auto';
+        box.style.width = w + 'px'; box.style.height = h + 'px';
+        r = box.getBoundingClientRect();
+      }
+    }
+    return r;
+  }
+  function refit(reason) {
+    if (!rfb || closing) return;
+    var r = screenBox();
+    try { rfb.scaleViewport = true; } catch (e) {}   // setter 内部会 _updateScale()
+    try { if (rfb._updateScale) rfb._updateScale(); } catch (e) {}
+    var c = document.querySelector('#screen canvas');
+    var w = c ? c.style.width : '-';
+    if (reason || w === '0px' || !w) {
+      var now = Date.now();
+      if (reason || now - lastRefitLog > 8000) {
+        lastRefitLog = now;
+        log('重算缩放(' + (reason || '看门狗') + ') 容器=' +
+          (r ? (Math.round(r.width) + 'x' + Math.round(r.height)) : '无') +
+          ' 窗口=' + window.innerWidth + 'x' + window.innerHeight + ' css=' + w);
+      }
+    }
+  }
+  var lastRefitLog = 0;
+
+  /* 原生 HTTP 兜底：WebView 的 fetch 被拦时改走原生 HttpURLConnection（仍在客户端，不经中转） */
+  var httpSeq = 0, httpWaiters = {};
+  function nativeHttp(method, url, body) {
+    return new Promise(function (resolve, reject) {
+      if (!(window.FluxNet && FluxNet.request)) { reject(new Error('原生 HTTP 不可用')); return; }
+      var id = 'h' + (++httpSeq);
+      httpWaiters[id] = { resolve: resolve, reject: reject };
+      setTimeout(function () {
+        if (httpWaiters[id]) { delete httpWaiters[id]; reject(new Error('原生请求超时')); }
+      }, 95000);
+      try { FluxNet.request(id, method, url, body || ''); }
+      catch (e) { delete httpWaiters[id]; reject(e); }
+    });
+  }
+  function settleHttp(id, ok, text) {
+    var w = httpWaiters[id];
+    if (!w) return;
+    delete httpWaiters[id];
+    if (String(ok) === '1') w.resolve(String(text));
+    else w.reject(new Error(String(text) || '原生请求失败'));
+  }
+  function hint(text) {
+    hintEl.textContent = text;
+    hintEl.classList.add('show');
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(function () { hintEl.classList.remove('show'); }, 2600);
+  }
+  function applyViewOnly() {
+    if (rfb) rfb.viewOnly = viewOnly;
+    controlEl.textContent = viewOnly ? '接管' : '交还';
+    controlEl.className = viewOnly ? '' : 'on';
+    toolsEl.classList.toggle('show', !viewOnly);
+    post({ phase: 'ready', text: viewOnly ? '观看中' : '已接管', control: !viewOnly });
+  }
+
+  /* ---------------- 收尾 / 自动重连 ---------------- */
+  function flushPending(reason) {
+    Object.keys(pending).forEach(function (k) {
+      var p = pending[k];
+      delete pending[k];
+      try { p.reject(new Error(reason)); } catch (e) {}
+    });
+  }
+  function teardown() {
+    flushPending('连接已断开');
+    if (rfb) {
+      var r = rfb;
+      rfb = null;
+      try { r.disconnect(); } catch (e) {}
+    }
+    var target = $('screen');
+    if (target) target.innerHTML = '';
+    if (ws) {
+      var w = ws;
+      ws = null;
+      w.onopen = null; w.onmessage = null; w.onerror = null; w.onclose = null;
+      try { w.close(); } catch (e) {}
+    }
+    mods = {};
+  }
+  function scheduleReconnect(reason) {
+    if (closing || retryTimer) return;
+    retry++;
+    if (retry > 10) {
+      setStatus('连接中断', 'err');
+      post({ phase: 'error', text: '连接中断：' + reason });
+      log('放弃重连：' + reason, 'err');
+      return;
+    }
+    var wait = Math.min(1000 + 900 * retry, 10000);
+    setStatus('正在重连 (' + retry + '/10)…');
+    post({ phase: 'connecting', text: '正在重连 (' + retry + '/10)…' });
+    log('第 ' + retry + ' 次重连，' + wait + 'ms 后：' + reason);
+    teardown();
+    retryTimer = setTimeout(function () {
+      retryTimer = null;
+      if (!closing) run();
+    }, wait);
+  }
+
+  /* ---------------- JSON-RPC over the gateway WebSocket ---------------- */
+  function rpc(method, params, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      if (!ws || ws.readyState !== 1) { reject(new Error('网关未连接')); return; }
+      var id = ++seq;
+      var body = { jsonrpc: '2.0', id: id, method: method, params: params || {} };
+      body.params.profile = ctx.profile;
+      pending[id] = { resolve: resolve, reject: reject, method: method };
+      ws.send(JSON.stringify(body));
+      log('→ ' + method);
+      setTimeout(function () {
+        if (pending[id]) { delete pending[id]; reject(new Error(method + ' 超时')); }
+      }, timeoutMs || 90000);
+    });
+  }
+
+  function openGateway() {
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var done = function (fn, arg) { if (!settled) { settled = true; fn(arg); } };
+      var url = 'wss://' + ctx.host + '/api/ws?token=' + encodeURIComponent(ctx.token);
+      var sock = ws = new WebSocket(url);
+      sock.onopen = function () { log('网关已打开'); };
+      sock.onmessage = function (ev) {
+        var msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (msg.id != null && pending[msg.id]) {
+          var p = pending[msg.id];
+          delete pending[msg.id];
+          if (msg.error) {
+            log('← ' + p.method + ' 失败 ' + ((msg.error && msg.error.message) || ''), 'err');
+            p.reject(new Error((msg.error && msg.error.message) || '请求失败'));
+          } else {
+            log('← ' + p.method + ' 成功');
+            p.resolve(msg.result);
+          }
+          return;
+        }
+        var params = msg.params || {};
+        if (params.type === 'gateway.ready') { log('网关就绪'); done(resolve); }
+      };
+      sock.onerror = function () { log('网关连接出错', 'err'); done(reject, new Error('无法连接网关')); };
+      sock.onclose = function (ev) {
+        log('网关关闭 code=' + ev.code + (ev.reason ? ' ' + ev.reason : ''), settled ? 'err' : undefined);
+        flushPending('网关已关闭');
+        if (!settled) { done(reject, new Error('网关已关闭 (' + ev.code + ')')); return; }
+        if (!closing) scheduleReconnect('gateway ' + ev.code);
+      };
+      setTimeout(function () { done(reject, new Error('网关连接超时')); }, 15000);
+    });
+  }
+
+  /* ---------------- bridge：把 bot 的浏览器窗口拉回来 ---------------- */
+  function bridgeStart() {
+    if (!ctx.bridge) return Promise.resolve();
+    var url = ctx.bridge + '/desktop/start?key=' + encodeURIComponent(ctx.bridgeKey) +
+      '&profile=' + encodeURIComponent(ctx.profile);
+    log('准备桌面');
+    var p;
+    if (window.FluxNet && FluxNet.request) {
+      p = nativeHttp('POST', url, '').then(function (txt) {
+        return { status: 200, ok: true, text: txt, via: 'native' };
+      });
+    } else {
+      var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+      var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, 90000);
+      var opt = { method: 'POST', mode: 'cors' };
+      if (ctrl) opt.signal = ctrl.signal;
+      p = fetch(url, opt).then(function (res) {
+        return res.text().then(function (txt) {
+          return { status: res.status, ok: res.ok, text: txt, via: 'fetch' };
+        });
+      }).then(function (r) {
+        clearTimeout(timer);
+        return r;
+      }, function (e) {
+        clearTimeout(timer);
+        throw e;
+      });
+    }
+    return p.then(function (r) {
+      log('桌面 ' + r.status + ' ' + String(r.text).replace(/\s+/g, ' ').slice(0, 100) + ' (' + r.via + ')',
+        r.ok ? undefined : 'err');
+    }).catch(function (err) {
+      log('桌面准备失败 ' + ((err && err.message) || err), 'err');
+    });
+  }
+
+  /* ---------------- screen ---------------- */
+  function acquireLease() {
+    return rpc('display.lease.acquire', { viewer_id: viewerId }, 15000).then(function () {
+      lease = true;
+      viewOnly = false;
+      applyViewOnly();
+      hint('已接管，可以直接点按操作');
+    }).catch(function (err) {
+      lease = false;
+      viewOnly = true;
+      applyViewOnly();
+      hint('接管失败：' + err.message);
+    });
+  }
+
+  function attach() {
+    return rpc('display.observe', {}).then(function (obs) {
+      viewerId = obs.viewer_id;
+      var url = 'wss://' + ctx.host + '/api/display/ws?display_ticket=' + encodeURIComponent(obs.ticket);
+      return new Promise(function (resolve, reject) {
+        var target = $('screen');
+        target.innerHTML = '';
+        var self = new RFB(target, url, { shared: true, credentials: {} });
+        rfb = self;
+        self.scaleViewport = true;
+        self.clipViewport = false;
+        self.resizeSession = false;
+        self.viewOnly = viewOnly;
+        var settled = false;
+        var settle = function (fn, arg) { if (!settled) { settled = true; fn(arg); } };
+        self.addEventListener('connect', function () {
+          if (rfb !== self) return;
+          log('画面已连接');
+          setStatus('已连接', 'ok');
+          applyViewOnly();
+          settle(resolve);
+          if (!viewOnly) acquireLease();
+          refit('连接后');
+          setTimeout(function () { refit('300ms'); }, 300);
+          setTimeout(function () { refit('1200ms'); }, 1200);
+          setTimeout(function () { probeCanvas('自检3s'); }, 3000);
+          setTimeout(function () { probeCanvas('自检9s'); }, 9000);
+        });
+        self.addEventListener('disconnect', function (ev) {
+          if (rfb !== self) return;   // 已被 teardown 顶替
+          rfb = null;
+          var d = ev.detail || {};
+          if (closing) return;
+          log('画面断开 clean=' + !!d.clean + ' code=' + (d.code || '?'), 'err');
+          if (d.clean) {
+            setStatus('已断开');
+            post({ phase: 'closed', text: '已断开' });
+          } else {
+            setStatus('画面中断，正在重连…', 'err');
+            post({ phase: 'error', text: '画面连接中断（' + (d.code || '?') + '）' });
+          }
+          settle(reject, new Error('画面连接中断（' + (d.code || '?') + '）'));
+          scheduleReconnect('screen ' + (d.code || '?'));
+        });
+        self.addEventListener('securityfailure', function (ev) {
+          if (rfb !== self) return;
+          var reason = (ev.detail && ev.detail.reason) || '';
+          log('安全协商失败 ' + reason, 'err');
+          setStatus('安全协商失败', 'err');
+          settle(reject, new Error('安全协商失败: ' + reason));
+        });
+        setTimeout(function () { settle(reject, new Error('画面连接超时')); }, 30000);
+      });
+    });
+  }
+
+  function attempt() {
+    setStatus('连接中…');
+    post({ phase: 'connecting', text: '连接中…' });
+    return bridgeStart()
+      .then(function () {
+        setStatus('连接网关…');
+        return openGateway();
+      })
+      .then(function () {
+        setStatus('检查桌面…');
+        return rpc('display.status', {});
+      })
+      .then(function (st) {
+        if (st && st.running) return;
+        if (st && st.blocker) {
+          var e = new Error(st.blocker);
+          e.fatal = true;
+          throw e;
+        }
+        setStatus('启动桌面…');
+        post({ phase: 'starting', text: '启动桌面…' });
+        log('启动桌面');
+        return rpc('display.start', {}, 150000);
+      })
+      .then(function () {
+        setStatus('连接画面…');
+        return attach();
+      })
+      .then(function () {
+        retry = 0;
+      });
+  }
+
+  function run() {
+    busy = true;
+    attempt().then(function () {
+      busy = false;
+    }, function (err) {
+      busy = false;
+      var msg = (err && err.message) || '连接失败';
+      if (closing) return;
+      log('连接失败：' + msg, 'err');
+      if (err && err.fatal) {
+        setStatus(msg, 'err');
+        post({ phase: 'error', text: msg });
+        return;
+      }
+      scheduleReconnect(msg);
+    });
+  }
+
+  function start(cfg) {
+    ctx = cfg;
+    closing = false;
+    lease = false;
+    viewOnly = true;
+    retry = 0;
+    busy = false;
+    setLoading(true, '正在连接…');
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    teardown();
+    log('连接 ' + ctx.profile);
+    run();
+  }
+
+  /* ---------------- lease ---------------- */
+  function takeover() {
+    if (!rfb) { hint('画面还没连上'); return; }
+    acquireLease();
+  }
+  function release() {
+    allModsUp();
+    if (!lease) { viewOnly = true; applyViewOnly(); return; }
+    rpc('display.lease.release', { viewer_id: viewerId }, 15000).catch(function () {
+    }).then(function () {
+      lease = false;
+      viewOnly = true;
+      applyViewOnly();
+    });
+  }
+
+  /* ---------------- keys ---------------- */
+  function sendKey(keysym) {
+    if (!rfb || viewOnly) { hint('先点「接管」'); return; }
+    rfb.sendKey(keysym, null, true);
+    rfb.sendKey(keysym, null, false);
+  }
+  function allModsUp() {
+    Object.keys(mods).forEach(function (ks) {
+      if (rfb) rfb.sendKey(Number(ks), null, false);
+      delete mods[ks];
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-mod]'), function (b) {
+      b.classList.remove('active');
+    });
+  }
+  function sendText(text) {
+    if (!rfb || viewOnly) { hint('先点「接管」'); return; }
+    var nonAscii = '';
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i], cp = text.codePointAt(i);
+      if (cp > 0xffff) i++;
+      if (cp === 0x0a) { sendKey(0xff0d); }
+      else if (cp < 0x80) {
+        var ks = cp;
+        Object.keys(mods).forEach(function (m) { rfb.sendKey(Number(m), null, true); });
+        rfb.sendKey(ks, null, true);
+        rfb.sendKey(ks, null, false);
+        Object.keys(mods).forEach(function (m) { rfb.sendKey(Number(m), null, false); });
+      } else {
+        nonAscii += String.fromCodePoint(cp);
+      }
+    }
+    if (nonAscii) {
+      rfb.clipboardPasteFrom(nonAscii);
+      hint('中文已放进桌面剪贴板，在桌面里按 Ctrl+V 粘贴');
+    }
+  }
+
+  /* ---------------- wiring ---------------- */
+  controlEl.addEventListener('click', function () { viewOnly ? takeover() : release(); });
+  statusEl.addEventListener('click', function () {
+    if (statusEl.classList.contains('err')) window.Flux.reconnect();
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#keys [data-k]'), function (b) {
+    b.addEventListener('click', function () { if (viewOnly) { hint('先点「接管」'); return; } sendKey(Number(b.dataset.k)); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#keys [data-mod]'), function (b) {
+    b.addEventListener('click', function () {
+      if (!rfb || viewOnly) { hint('先点「接管」'); return; }
+      var ks = b.dataset.mod;
+      if (mods[ks]) { rfb.sendKey(Number(ks), null, false); delete mods[ks]; b.classList.remove('active'); }
+      else { rfb.sendKey(Number(ks), null, true); mods[ks] = true; b.classList.add('active'); }
+    });
+  });
+  $('kb').addEventListener('click', function () {
+    if (viewOnly) { hint('先点「接管」'); return; }
+    sendbarEl.classList.toggle('show');
+    if (sendbarEl.classList.contains('show')) { textEl.focus(); kbdEl.focus(); }
+  });
+  $('send').addEventListener('click', function () {
+    if (textEl.value) { sendText(textEl.value); textEl.value = ''; }
+    kbdEl.focus();
+  });
+  kbdEl.addEventListener('input', function () {
+    var v = kbdEl.value;
+    kbdEl.value = '';
+    if (v) sendText(v);
+  });
+  $('fit').addEventListener('click', function () {
+    if (!rfb) return;
+    refit('手动适配');
+    hint('已适配屏幕');
+  });
+  window.addEventListener('resize', function () { refit('窗口变化'); });
+  window.addEventListener('orientationchange', function () { setTimeout(function () { refit('旋转'); }, 400); });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', function () { refit('视口变化'); });
+  }
+  window.addEventListener('beforeunload', function () { window.Flux.disconnect(); });
+  window.addEventListener('pagehide', function () { window.Flux.disconnect(); });
+
+  /* 息屏/切后台回来、或画面悄悄掉了：拉回来 */
+  document.addEventListener('visibilitychange', function () {
+    if (closing) return;
+    log('可见性 ' + document.visibilityState);
+    if (document.visibilityState !== 'visible') return;
+    if (busy || retryTimer) return;
+    if (!ws || ws.readyState !== 1 || !rfb) {
+      retry = 0;
+      scheduleReconnect('回到前台');
+    }
+  });
+  setInterval(function () {
+    if (closing || busy || retryTimer) return;
+    if (document.visibilityState !== 'visible') return;
+    if (!ws || ws.readyState !== 1 || !rfb) scheduleReconnect('心跳检查');
+  }, 20000);
+
+  /* 兜底：帧已经到了背板但没翻到可见画布时，定期手动翻一次 */
+  setInterval(function () {
+    if (closing || !rfb || !rfb._display) return;
+    try {
+      var d = rfb._display;
+      if (d._renderQ.length > 0) return;
+      var b = d._damageBounds;
+      if (b && b.right > b.left && b.bottom > b.top) d.flip(true);
+    } catch (e) {}
+  }, 700);
+
+  /* 兜底：画布被缩放成 0 像素时（容器量不到尺寸），持续尝试重算 */
+  setInterval(function () {
+    if (closing || !rfb) return;
+    var c = document.querySelector('#screen canvas');
+    if (!c) return;
+    var r = c.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) refit(null);
+  }, 1200);
+
+  /* ---------------- native entry points ---------------- */
+  window.Flux = {
+    connect: function (host, token, profile, bridge, bridgeKey) {
+      window.Flux.disconnect();
+      start({ host: host, token: token, profile: profile, bridge: bridge, bridgeKey: bridgeKey });
+    },
+    reconnect: function () {
+      if (!ctx) return;
+      var c = ctx;
+      window.Flux.connect(c.host, c.token, c.profile, c.bridge, c.bridgeKey);
+    },
+    takeover: takeover,
+    release: release,
+    /* 原生探测结果（DNS/TCP/HTTPS）只进日志，不再显示在屏幕上 */
+    diag: function (text) { log(String(text)); },
+    /* 原生 HTTP 回调（见 FluxNet.request） */
+    __http: settleHttp,
+    disconnect: function () {
+      closing = true;
+      clearTimeout(retryTimer);
+      retryTimer = null;
+      if (lease && ws && ws.readyState === 1 && ctx) {
+        try {
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0', id: ++seq, method: 'display.lease.release',
+            params: { profile: ctx.profile, viewer_id: viewerId }
+          }));
+        } catch (e) {}
+      }
+      lease = false;
+      if (ctx) log('主动断开');
+      if (rfb) { var r = rfb; rfb = null; try { r.disconnect(); } catch (e) {} }
+      flushPending('已断开');
+      if (ws) {
+        var w = ws;
+        ws = null;
+        w.onopen = null; w.onmessage = null; w.onerror = null; w.onclose = null;
+        try { w.close(); } catch (e) {}
+      }
+    }
+  };
+})();
+</script>
+</body>
+</html>

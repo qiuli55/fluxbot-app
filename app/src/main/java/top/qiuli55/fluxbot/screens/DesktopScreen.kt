@@ -46,6 +46,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import org.json.JSONObject
 import top.qiuli55.fluxbot.data.BotDesktop
 import top.qiuli55.fluxbot.nav.LocalStore
@@ -295,6 +298,18 @@ fun DesktopScreen(botId: String) {
             BotDesktop.CONFIG_URL,
         ).joinToString(",") { JSONObject.quote(it) }
         "window.Flux && window.Flux.connect($args)"
+    }
+
+    /* 切后台再回前台时 WebView 的视口可能已经变了，通知页面重排浮球/工具面板 */
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                holder[0]?.evaluateJavascript("window.Flux && window.Flux.resume()", null)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
 
     DisposableEffect(Unit) {

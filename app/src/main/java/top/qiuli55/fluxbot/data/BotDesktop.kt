@@ -11,12 +11,18 @@ object BotDesktop {
      * 国内网络对 *.instabox.tech 有 DNS 污染，直连会解析到劫持 IP 并超时。
      * 因此统一走 InstaBox 上的 Cloudflare 隧道（不经用户自己的服务器）。
      */
-    const val HOST = "due-nearby-sperm-strengths.trycloudflare.com"
+    const val HOST = "mirror-artwork-affects-bradford.trycloudflare.com"
     const val TOKEN = "hk_4094f29dcdcf9d5738e976f4dff22d12"
 
     /** 宿主机上的极简桥：把 bot 的浏览器窗口拉回桌面。 */
-    const val BRIDGE = "https://spirit-bangkok-expensive-align.trycloudflare.com"
+    const val BRIDGE = "https://therapy-robots-confidentiality-former.trycloudflare.com"
     const val BRIDGE_KEY = "fdk_7c1e4b93a2f05d8e6b4a9c3f1d7e2085"
+
+    /**
+     * 快速隧道每次重启域名都会变，上面的值只是兜底。
+     * 页面启动时会先读这个稳定地址拿最新入口（只取配置，画面不经过该服务器）。
+     */
+    const val CONFIG_URL = "https://flux.qiuli55.top/fluxbot-mobile/desktop.json"
 
     fun profile(botId: String): String = "bot" + botId.replace("-", "").lowercase().take(8)
 }

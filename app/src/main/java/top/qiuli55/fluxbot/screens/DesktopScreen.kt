@@ -292,6 +292,7 @@ fun DesktopScreen(botId: String) {
             profile,
             BotDesktop.BRIDGE,
             BotDesktop.BRIDGE_KEY,
+            BotDesktop.CONFIG_URL,
         ).joinToString(",") { JSONObject.quote(it) }
         "window.Flux && window.Flux.connect($args)"
     }

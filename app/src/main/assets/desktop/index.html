@@ -778,9 +778,30 @@
       });
   }
 
+  /* ---------------- 隧道入口动态发现 ---------------- */
+  /* 快速隧道重启后域名会变：先向稳定地址取最新入口，失败就沿用内置地址 */
+  var HOST_RE = /^[a-z0-9][a-z0-9-]*\.trycloudflare\.com$/i;
+  var BRIDGE_RE = /^https:\/\/[a-z0-9][a-z0-9-]*\.trycloudflare\.com$/i;
+  function resolveEndpoints() {
+    if (!ctx.configUrl || !(window.FluxNet && FluxNet.request)) return Promise.resolve();
+    return nativeHttp('GET', ctx.configUrl + '?t=' + Date.now(), '').then(function (txt) {
+      var cfg = JSON.parse(String(txt).trim());
+      var host = String(cfg.gateway || '').replace(/^https?:\/\//i, '').replace(/[\/?#].*$/, '');
+      var bridge = String(cfg.bridge || '').replace(/\/+$/, '');
+      if (!HOST_RE.test(host) || !BRIDGE_RE.test(bridge)) throw new Error('入口配置格式不对');
+      if (host !== ctx.host || bridge !== ctx.bridge) {
+        ctx.host = host;
+        ctx.bridge = bridge;
+        log('入口已更新 ' + host);
+      }
+    }).catch(function (err) {
+      log('取入口配置失败，用内置地址：' + ((err && err.message) || err), 'err');
+    });
+  }
+
   function run() {
     busy = true;
-    attempt().then(function () {
+    resolveEndpoints().then(attempt).then(function () {
       busy = false;
     }, function (err) {
       busy = false;
@@ -1117,14 +1138,14 @@
 
   /* ---------------- native entry points ---------------- */
   window.Flux = {
-    connect: function (host, token, profile, bridge, bridgeKey) {
+    connect: function (host, token, profile, bridge, bridgeKey, configUrl) {
       window.Flux.disconnect();
-      start({ host: host, token: token, profile: profile, bridge: bridge, bridgeKey: bridgeKey });
+      start({ host: host, token: token, profile: profile, bridge: bridge, bridgeKey: bridgeKey, configUrl: configUrl });
     },
     reconnect: function () {
       if (!ctx) return;
       var c = ctx;
-      window.Flux.connect(c.host, c.token, c.profile, c.bridge, c.bridgeKey);
+      window.Flux.connect(c.host, c.token, c.profile, c.bridge, c.bridgeKey, c.configUrl);
     },
     takeover: takeover,
     release: release,

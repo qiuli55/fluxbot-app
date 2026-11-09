@@ -273,10 +273,15 @@ fun DesktopScreen(botId: String) {
     var landscape by remember { mutableStateOf(false) }
     val activity = remember(view) { view.context.findActivity() }
 
-    /* 布局变化（横屏/全屏/键盘）后让页面重算画面尺寸 */
-    fun refitNow() {
+    /* 布局变化（横屏/全屏/键盘）后把 WebView 实际尺寸告诉页面，再让画面重算 */
+    fun refitNow(w: Int = 0, h: Int = 0) {
         handler.postDelayed({
-            holder[0]?.evaluateJavascript("window.Flux && window.Flux.refit()", null)
+            val wv = holder[0] ?: return@postDelayed
+            if (w > 0 && h > 0) {
+                wv.evaluateJavascript("window.Flux && window.Flux.setViewport($w, $h)", null)
+            } else {
+                wv.evaluateJavascript("window.Flux && window.Flux.refit()", null)
+            }
         }, 350)
     }
 
@@ -359,7 +364,7 @@ fun DesktopScreen(botId: String) {
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(profile, fontSize = 10.5.sp, color = Flux.text4, maxLines = 1)
+                    Text("$profile · $version", fontSize = 10.5.sp, color = Flux.text4, maxLines = 1)
                 }
                 Pill(
                     state,
@@ -374,7 +379,7 @@ fun DesktopScreen(botId: String) {
         }
 
         AndroidView(
-            modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { refitNow() },
+            modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { refitNow(it.width, it.height) },
             factory = { ctx ->
                 var loaded = false
                 WebView(ctx).apply {

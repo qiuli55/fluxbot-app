@@ -12,10 +12,17 @@
     font: 13px/1.4 -apple-system, "Noto Sans SC", system-ui, sans-serif;
     color: #e8eaef;
   }
+  /* 舞台：固定在可见视口上，所有浮层都以它为基准定位。
+     之前浮层直接挂在 body 上，页面尺寸一旦算错，底部工具条就跑到屏幕外看不见。 */
+  #stage {
+    position: fixed; top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    overflow: hidden; background: #0b0d12;
+  }
   /* 不用 inset：部分 WebView 不支持，绝对定位元素会退化成 0 尺寸，
      noVNC 的 autoscale 就会算出 scale=0（画布 css 0px，屏幕全黑）。 */
   #screen {
-    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    position: absolute; top: 0; left: 0;
     width: 100%; height: 100%;
   }
   #screen canvas { image-rendering: auto; }
@@ -64,11 +71,12 @@
   #tools {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 22;
     display: none; flex-direction: column; gap: 8px;
-    padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
-    background: linear-gradient(to top, rgba(8, 10, 14, .94), rgba(8, 10, 14, .0));
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    background: rgba(10, 12, 17, .96);
+    border-top: 1px solid rgba(255, 255, 255, .08);
   }
   #tools.show { display: flex; }
-  #keys { display: flex; gap: 6px; overflow-x: auto; }
+  #keys { display: flex; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   #keys button, #sendbar button, #tools > button {
     flex: 0 0 auto;
     min-width: 42px; height: 36px; padding: 0 11px;
@@ -76,6 +84,9 @@
     background: rgba(30, 34, 43, .92); color: #e8eaef;
     font-size: 12.5px;
   }
+  /* 新功能按钮用蓝色高亮，和按键区分开 */
+  #keys button.hl { background: rgba(47,109,246,.24); border-color: rgba(47,109,246,.5); color: #d6e4ff; }
+  #keys .sep { flex: 0 0 auto; align-self: center; width: 1px; height: 22px; background: rgba(255,255,255,.14); margin: 0 3px; }
   #keys button.active { background: #2f6df6; border-color: #2f6df6; color: #fff; }
   #sendbar { display: none; gap: 6px; }
   #sendbar.show { display: flex; }
@@ -86,7 +97,7 @@
   }
   #kbd { position: fixed; left: -9999px; top: 0; width: 10px; height: 10px; opacity: 0; }
   #hint {
-    position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%);
+    position: absolute; left: 50%; bottom: calc(118px + env(safe-area-inset-bottom)); transform: translateX(-50%);
     z-index: 23; max-width: 86%; padding: 8px 14px; border-radius: 10px;
     background: rgba(12,14,20,.92); border: 1px solid rgba(255,255,255,.12);
     font-size: 12px; color: #cfd4de; opacity: 0; transition: opacity .2s;
@@ -101,22 +112,10 @@
     color: #cfd4de; font-size: 12.5px; backdrop-filter: blur(8px);
   }
   #exitfs.show { display: block; }
-  #viewbar {
-    position: absolute; right: 12px;
-    bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 21;
-    display: none; gap: 6px;
-  }
-  #viewbar.show { display: flex; }
-  #viewbar button {
-    min-width: 42px; height: 36px; padding: 0 10px; border-radius: 10px;
-    border: 1px solid rgba(255,255,255,.12); background: rgba(12,14,20,.8);
-    color: #e8eaef; font-size: 12.5px; backdrop-filter: blur(8px);
-  }
-  /* 接管后底部工具条出现，缩放条上移让位 */
-  #tools.show ~ #viewbar { bottom: calc(112px + env(safe-area-inset-bottom)); }
 </style>
 </head>
 <body>
+<div id="stage">
 <div id="screen"></div>
 <div id="loading"><div class="spin"></div><div id="loadingText">正在连接…</div></div>
 <div id="status" class="pill">未连接</div>
@@ -127,6 +126,16 @@
     <button id="send">发送</button>
   </div>
   <div id="keys">
+    <button id="kb" class="hl">键盘</button>
+    <button id="rc" class="hl">右键</button>
+    <button id="paste" class="hl">粘贴</button>
+    <button id="rot" class="hl">横屏</button>
+    <button id="fs" class="hl">全屏</button>
+    <button id="fit" class="hl">适配</button>
+    <button id="zi" class="hl">放大＋</button>
+    <button id="zo" class="hl">缩小−</button>
+    <button id="zv">100%</button>
+    <span class="sep"></span>
     <button data-k="0xff1b">Esc</button>
     <button data-k="0xff09">Tab</button>
     <button data-mod="0xffe3">Ctrl</button>
@@ -137,23 +146,12 @@
     <button data-k="0xff54">↓</button>
     <button data-k="0xff0d">Enter</button>
     <button data-k="0xff08">⌫</button>
-    <button id="kb">键盘</button>
-    <button id="rc">右键</button>
-    <button id="paste">粘贴</button>
-    <button id="rot">横屏</button>
-    <button id="fs">全屏</button>
-    <button id="fit">适配</button>
   </div>
-</div>
-<!-- 缩放条：观看也能放大看细节，不依赖接管 -->
-<div id="viewbar">
-  <button id="zo">−</button>
-  <button id="zv">100%</button>
-  <button id="zi">＋</button>
 </div>
 <div id="hint"></div>
 <button id="exitfs">退出全屏</button>
 <input id="kbd" inputmode="text">
+</div>
 
 <script src="novnc.bundle.js"></script>
 <script>
@@ -179,15 +177,14 @@
   var $ = function (id) { return document.getElementById(id); };
   var statusEl = $('status'), controlEl = $('control'), toolsEl = $('tools');
   var hintEl = $('hint'), textEl = $('text'), sendbarEl = $('sendbar'), kbdEl = $('kbd');
-  var viewbarEl = $('viewbar');
   var loadingEl = $('loading'), loadingTextEl = $('loadingText');
 
   /* loading 由上下文决定：连接中/重连中显示，连上或报错隐藏 */
   function sizeLoading() {
-    var w = Math.round(window.innerWidth), h = Math.round(window.innerHeight);
-    if (w > 1 && h > 1) {
-      loadingEl.style.width = w + 'px';
-      loadingEl.style.height = h + 'px';
+    var b = viewportBox();
+    if (b.ok) {
+      loadingEl.style.width = b.w + 'px';
+      loadingEl.style.height = b.h + 'px';
     }
   }
   function setLoading(show, text) {
@@ -306,20 +303,45 @@
     if (!box) return null;
     var r = box.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) {
-      var w = Math.round(window.innerWidth), h = Math.round(window.innerHeight);
-      if (w > 1 && h > 1) {
+      var b = viewportBox();
+      if (b.ok) {
         box.style.position = 'absolute';
         box.style.left = '0'; box.style.top = '0';
-        box.style.right = 'auto'; box.style.bottom = 'auto';
-        box.style.width = w + 'px'; box.style.height = h + 'px';
+        box.style.width = b.w + 'px'; box.style.height = b.h + 'px';
         r = box.getBoundingClientRect();
       }
     }
     return r;
   }
+  /* 可见视口尺寸：优先用原生 WebView 的真实像素尺寸（最准），
+     其次量 #stage（fixed + 100vw/100vh），最后退回 client/inner 尺寸。
+     window.innerHeight 在个别 WebView 里会大于实际可见高度，
+     用它会算偏 #screen，让底部工具条跑到屏幕外。 */
+  var nativeBox = null;
   function viewportBox() {
-    var w = Math.round(window.innerWidth), h = Math.round(window.innerHeight);
+    if (nativeBox) return nativeBox;
+    var st = $('stage'), r = st ? st.getBoundingClientRect() : null;
+    var w = r ? Math.round(r.width) : 0, h = r ? Math.round(r.height) : 0;
+    if (w < 2 || h < 2) {
+      w = Math.round(document.documentElement.clientWidth || window.innerWidth);
+      h = Math.round(document.documentElement.clientHeight || window.innerHeight);
+    }
+    if (w < 2 || h < 2) {
+      w = Math.round(window.innerWidth); h = Math.round(window.innerHeight);
+    }
     return { w: w, h: h, ok: w > 1 && h > 1 };
+  }
+  /* 原生在布局变化时把 WebView 的物理像素尺寸传进来（横屏/全屏/键盘最可靠） */
+  function setViewport(pxW, pxH) {
+    var dpr = window.devicePixelRatio || 1;
+    var w = Math.round(pxW / dpr), h = Math.round(pxH / dpr);
+    if (!(w > 1 && h > 1)) return;
+    nativeBox = { w: w, h: h, ok: true };
+    var st = $('stage');
+    if (st) { st.style.width = w + 'px'; st.style.height = h + 'px'; }
+    sizeLoading();
+    applyView();
+    refit('原生视口');
   }
   /* 把当前缩放/平移写进 #screen 的布局尺寸与左上角位置。
      放大时 #screen 比窗口大，noVNC 会按更大的容器重新适配，画面自然变大；平移只改 left/top。 */
@@ -420,8 +442,10 @@
       var now = Date.now();
       if (reason || now - lastRefitLog > 8000) {
         lastRefitLog = now;
+        var vb = viewportBox();
         log('重算缩放(' + (reason || '看门狗') + ') 容器=' +
           (r ? (Math.round(r.width) + 'x' + Math.round(r.height)) : '无') +
+          ' 视口=' + vb.w + 'x' + vb.h +
           ' 窗口=' + window.innerWidth + 'x' + window.innerHeight +
           ' 缩放=' + Math.round(ZOOMS[zi] * 100) + '% css=' + w);
       }
@@ -460,8 +484,8 @@
     if (rfb) rfb.viewOnly = viewOnly;
     controlEl.textContent = viewOnly ? '接管' : '交还';
     controlEl.className = viewOnly ? '' : 'on';
-    toolsEl.classList.toggle('show', !viewOnly);
-    viewbarEl.classList.toggle('show', !!rfb);
+    /* 连上画面就把工具栏露出来（未接管时点按钮会提示先接管），保证入口可见 */
+    toolsEl.classList.toggle('show', !!rfb);
     post({ phase: 'ready', text: viewOnly ? '观看中' : '已接管', control: !viewOnly });
   }
 
@@ -489,7 +513,7 @@
       try { w.close(); } catch (e) {}
     }
     mods = {};
-    viewbarEl.classList.remove('show');
+    toolsEl.classList.remove('show');
   }
   function scheduleReconnect(reason) {
     if (closing || retryTimer) return;
@@ -643,6 +667,7 @@
           log('画面已连接');
           setStatus('已连接', 'ok');
           applyViewOnly();
+          hint(viewOnly ? '已连接，屏幕底部是工具栏' : '已接管，底部工具栏可用');
           settle(resolve);
           if (!viewOnly) acquireLease();
           refit('连接后');
@@ -848,8 +873,9 @@
     var c = document.querySelector('#screen canvas');
     if (!c) return;
     var r = c.getBoundingClientRect();
-    var x = Math.round(window.innerWidth / 2 - r.left);
-    var y = Math.round(window.innerHeight / 2 - r.top);
+    var b = viewportBox();
+    var x = Math.round(b.w / 2 - r.left);
+    var y = Math.round(b.h / 2 - r.top);
     if (x < 0 || y < 0 || x > r.width || y > r.height) { hint('画面中心不在可见区域'); return; }
     try {
       rfb._handleMouseButton(x, y, true, 4);
@@ -956,6 +982,8 @@
     release: release,
     /* 原生布局变化（横屏/全屏/键盘）后主动重算画面 */
     refit: function () { refit('原生通知'); },
+    /* 原生传入 WebView 实际像素尺寸 */
+    setViewport: setViewport,
     /* 原生探测结果（DNS/TCP/HTTPS）只进日志，不再显示在屏幕上 */
     diag: function (text) { log(String(text)); },
     /* 原生 HTTP 回调（见 FluxNet.request） */

@@ -73,7 +73,7 @@
   #fab {
     position: fixed; z-index: 24; right: 14px; bottom: calc(96px + env(safe-area-inset-bottom));
     left: auto; top: auto;
-    width: 50px; height: 50px; border-radius: 50%;
+    width: 58px; height: 58px; border-radius: 50%;
     display: none; align-items: center; justify-content: center;
     padding: 0;
     border: 1px solid rgba(255, 255, 255, .18);
@@ -86,20 +86,22 @@
   #fab:active { transform: scale(.93); }
   #fab.open { background: rgba(18, 22, 30, .96); border-color: rgba(255, 255, 255, .22); }
   #fab svg {
-    width: 23px; height: 23px; stroke: currentColor; fill: none;
+    width: 26px; height: 26px; stroke: currentColor; fill: none;
     stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
   }
   #fab .x { display: none; }
   #fab.open .x { display: block; }
   #fab.open .main { display: none; }
 
-  /* 工具面板：悬浮在球旁边，4 列图标网格 */
+  /* 工具面板：贴屏幕边缘显示（左右跟随悬浮球），尺寸由 JS 夹在可见区域内。
+     不再按悬浮球纵向居中——量错一次高度就会整块掉到屏幕外。 */
   #tools {
-    position: fixed; z-index: 23; width: 246px;
-    display: none; padding: 9px;
-    max-height: calc(100vh - 16px); overflow-y: auto;
+    position: fixed; z-index: 23; width: 268px;
+    right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); left: auto; top: auto;
+    display: none; padding: 10px;
+    max-height: calc(100vh - 24px); overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    border-radius: 16px;
+    border-radius: 18px;
     background: rgba(12, 15, 21, .96);
     border: 1px solid rgba(255, 255, 255, .10);
     box-shadow: 0 16px 40px rgba(0, 0, 0, .5);
@@ -108,13 +110,13 @@
   #tools.show { display: block; }
   #keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
   #keys button {
-    height: 54px; padding: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 3px;
-    border-radius: 11px; border: 1px solid rgba(255, 255, 255, .10);
-    background: rgba(28, 32, 41, .9); color: #dfe4ee; font-size: 9.5px;
+    height: 62px; padding: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 4px;
+    border-radius: 13px; border: 1px solid rgba(255, 255, 255, .10);
+    background: rgba(28, 32, 41, .9); color: #dfe4ee; font-size: 10.5px;
   }
   #keys button svg {
-    width: 19px; height: 19px; stroke: currentColor; fill: none;
+    width: 22px; height: 22px; stroke: currentColor; fill: none;
     stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round;
   }
   #keys button span { line-height: 1; opacity: .8; }
@@ -887,11 +889,29 @@
   }
 
   /* ---------------- 悬浮球 / 工具面板 ---------------- */
-  var FAB_SIZE = 50, FAB_MARGIN = 8, toolsOpen = false;
+  var FAB_SIZE = 58, FAB_MARGIN = 8, toolsOpen = false;
   function clampNum(v, min, max) { return v < min ? min : (v > max ? max : v); }
   function fabVisible() { return fabEl.classList.contains('show'); }
-  function setFabPos(x, y) {
+  /* 真正可见的区域：几种量法取最小值。个别 WebView 的 innerHeight 或原生像素尺寸
+     会大于实际可见高度，用大了就会把浮球/面板摆到屏幕外（表现为「点了没反应」）。 */
+  function uiBox() {
+    var ws = [], hs = [];
+    var de = document.documentElement, vv = window.visualViewport;
+    function take(w, h) { if (w > 1 && h > 1) { ws.push(Math.round(w)); hs.push(Math.round(h)); } }
+    if (de) take(de.clientWidth, de.clientHeight);
+    take(window.innerWidth, window.innerHeight);
+    if (vv) take(vv.width, vv.height);
     var b = viewportBox();
+    if (b.ok) take(b.w, b.h);
+    if (!ws.length) return { w: 0, h: 0, ok: false };
+    return {
+      w: Math.min.apply(null, ws),
+      h: Math.min.apply(null, hs),
+      ok: true
+    };
+  }
+  function setFabPos(x, y) {
+    var b = uiBox();
     if (!b.ok) return;
     var px = clampNum(x, FAB_MARGIN, Math.max(FAB_MARGIN, b.w - FAB_SIZE - FAB_MARGIN));
     var py = clampNum(y, FAB_MARGIN, Math.max(FAB_MARGIN, b.h - FAB_SIZE - FAB_MARGIN));
@@ -901,13 +921,13 @@
     fabEl.style.top = Math.round(py) + 'px';
   }
   function defaultFabPos() {
-    var b = viewportBox();
+    var b = uiBox();
     /* 默认右下角，避开底部提示条 */
     setFabPos(b.w - FAB_SIZE - 14, b.h - FAB_SIZE - 96);
   }
   function saveFabPos() {
     try {
-      var b = viewportBox();
+      var b = uiBox();
       if (!b.ok) return;
       var r = fabEl.getBoundingClientRect();
       localStorage.setItem('flux.fab', JSON.stringify({ x: r.left / b.w, y: r.top / b.h }));
@@ -916,27 +936,29 @@
   function loadFabPos() {
     var saved = null;
     try { saved = JSON.parse(localStorage.getItem('flux.fab') || 'null'); } catch (e) {}
-    var b = viewportBox();
+    var b = uiBox();
     if (b.ok && saved && typeof saved.x === 'number' && typeof saved.y === 'number') {
       setFabPos(saved.x * b.w, saved.y * b.h);
     } else {
       defaultFabPos();
     }
   }
-  /* 面板贴着球放：优先左侧，空间不够就右侧，纵向以球为中心并夹在屏幕内 */
+  /* 面板贴边：横向跟随球（球在左半屏贴左，否则贴右），纵向放在球的上方/下方。
+     纵向只依赖球的真实 rect，不再量面板 offsetHeight——量错一次就会整块掉到屏幕外。 */
   function positionTools() {
     if (!toolsOpen || !fabVisible()) return;
-    var b = viewportBox();
+    var b = uiBox();
+    if (!b.ok) return;
     var fr = fabEl.getBoundingClientRect();
-    var tw = toolsEl.offsetWidth || 246, th = toolsEl.offsetHeight || 220, gap = 10;
-    var left = fr.left - tw - gap;
-    if (left < FAB_MARGIN) left = fr.right + gap;
-    if (left + tw > b.w - FAB_MARGIN) left = b.w - tw - FAB_MARGIN;
-    if (left < FAB_MARGIN) left = FAB_MARGIN;
-    var top = fr.top + fr.height / 2 - th / 2;
-    top = clampNum(top, FAB_MARGIN, Math.max(FAB_MARGIN, b.h - th - FAB_MARGIN));
-    toolsEl.style.left = Math.round(left) + 'px';
-    toolsEl.style.top = Math.round(top) + 'px';
+    var gap = 10, edge = 12;
+    var onLeft = (fr.left + fr.width / 2) < b.w / 2;
+    toolsEl.style.left = onLeft ? edge + 'px' : 'auto';
+    toolsEl.style.right = onLeft ? 'auto' : edge + 'px';
+    var below = (fr.top + fr.height / 2) < b.h / 2;   /* 球在上半屏就把面板放它下面 */
+    var room = below ? (b.h - fr.bottom - gap - edge) : (fr.top - gap - edge);
+    toolsEl.style.top = below ? Math.round(fr.bottom + gap) + 'px' : 'auto';
+    toolsEl.style.bottom = below ? 'auto' : Math.round(b.h - fr.top + gap) + 'px';
+    toolsEl.style.maxHeight = Math.max(140, Math.round(room)) + 'px';
   }
   function toggleTools(force) {
     toolsOpen = typeof force === 'boolean' ? force : !toolsOpen;
@@ -969,7 +991,7 @@
     });
     fabEl.addEventListener('pointermove', function (e) {
       if (!down) return;
-      if (!moved && (Math.abs(e.clientX - sx) > 6 || Math.abs(e.clientY - sy) > 6)) moved = true;
+      if (!moved && (Math.abs(e.clientX - sx) > 12 || Math.abs(e.clientY - sy) > 12)) moved = true;
       if (!moved) return;
       setFabPos(e.clientX - offX, e.clientY - offY);
       if (toolsOpen) positionTools();
@@ -983,6 +1005,8 @@
       e.preventDefault();
     });
     fabEl.addEventListener('pointercancel', function () { down = false; });
+    /* 切后台时手指可能收不到 pointerup，回来会残留按下状态，这里清掉 */
+    window.addEventListener('blur', function () { down = false; moved = false; });
     fabEl.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     /* 点画面空白处收起面板，避免长期挡住桌面 */
     document.addEventListener('pointerdown', function (e) {
@@ -1093,6 +1117,14 @@
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', function () { applyView(); refit('视口变化'); reflowFab(); });
   }
+  /* 切后台再回来：WebView 视口可能已经变了，先把浮球/面板重新夹回可见区，再让画面重算 */
+  function resumeUI() {
+    applyView();
+    sizeLoading();
+    reflowFab();
+    refit('回到前台');
+  }
+  window.addEventListener('focus', function () { setTimeout(resumeUI, 150); });
   window.addEventListener('beforeunload', function () { window.Flux.disconnect(); });
   window.addEventListener('pagehide', function () { window.Flux.disconnect(); });
 
@@ -1101,6 +1133,8 @@
     if (closing) return;
     log('可见性 ' + document.visibilityState);
     if (document.visibilityState !== 'visible') return;
+    /* 回前台后布局可能还没稳定，稍等再摆一次浮球/面板 */
+    setTimeout(resumeUI, 150);
     if (busy || retryTimer) return;
     if (!ws || ws.readyState !== 1 || !rfb) {
       retry = 0;
@@ -1151,6 +1185,8 @@
     release: release,
     /* 原生布局变化（横屏/全屏/键盘）后主动重算画面 */
     refit: function () { refit('原生通知'); },
+    /* 原生 onResume：切后台回来重排浮球/面板 */
+    resume: function () { resumeUI(); },
     /* 原生传入 WebView 实际像素尺寸 */
     setViewport: setViewport,
     /* 原生探测结果（DNS/TCP/HTTPS）只进日志，不再显示在屏幕上 */

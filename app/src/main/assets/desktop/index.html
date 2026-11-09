@@ -33,10 +33,13 @@
   .pill.ok { color: #7fe0a8; border-color: rgba(127, 224, 168, .3); }
   .pill.err { color: #ff8f8f; border-color: rgba(255, 143, 143, .34); }
 
-  /* 居中连接动画：画面未就绪时显示，连上就隐藏 */
+  /* 居中连接动画：画面未就绪时显示，连上就隐藏。
+     不用百分比：部分 WebView 里绝对定位元素的 100% 会退化成 0，
+     容器高度为 0 时 flex 居中会把转圈挤出视口、文字贴到顶部。
+     vw/vh 兜底，实际尺寸由 JS 用 px 写死（同 #screen 的做法）。 */
   #loading {
-    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-    width: 100%; height: 100%;
+    position: absolute; top: 0; left: 0;
+    width: 100vw; height: 100vh;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 14px; z-index: 18; pointer-events: none;
   }
@@ -147,10 +150,19 @@
   var loadingEl = $('loading'), loadingTextEl = $('loadingText');
 
   /* loading 由上下文决定：连接中/重连中显示，连上或报错隐藏 */
+  function sizeLoading() {
+    var w = Math.round(window.innerWidth), h = Math.round(window.innerHeight);
+    if (w > 1 && h > 1) {
+      loadingEl.style.width = w + 'px';
+      loadingEl.style.height = h + 'px';
+    }
+  }
   function setLoading(show, text) {
     loadingEl.classList.toggle('hide', !show);
+    if (show) sizeLoading();
     if (show && text) loadingTextEl.textContent = text;
   }
+  sizeLoading();
 
   var ctx = null, ws = null, rfb = null, viewerId = null;
   var seq = 0, pending = {}, lease = false, viewOnly = true, closing = false;
@@ -680,7 +692,7 @@
     refit('手动适配');
     hint('已适配屏幕');
   });
-  window.addEventListener('resize', function () { refit('窗口变化'); });
+  window.addEventListener('resize', function () { refit('窗口变化'); sizeLoading(); });
   window.addEventListener('orientationchange', function () { setTimeout(function () { refit('旋转'); }, 400); });
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', function () { refit('视口变化'); });

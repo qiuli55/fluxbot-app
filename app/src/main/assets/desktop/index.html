@@ -498,14 +498,14 @@
 
   /* 原生 HTTP 兜底：WebView 的 fetch 被拦时改走原生 HttpURLConnection（仍在客户端，不经中转） */
   var httpSeq = 0, httpWaiters = {};
-  function nativeHttp(method, url, body) {
+  function nativeHttp(method, url, body, timeoutMs) {
     return new Promise(function (resolve, reject) {
       if (!(window.FluxNet && FluxNet.request)) { reject(new Error('原生 HTTP 不可用')); return; }
       var id = 'h' + (++httpSeq);
       httpWaiters[id] = { resolve: resolve, reject: reject };
       setTimeout(function () {
         if (httpWaiters[id]) { delete httpWaiters[id]; reject(new Error('原生请求超时')); }
-      }, 95000);
+      }, timeoutMs || 95000);
       try { FluxNet.request(id, method, url, body || ''); }
       catch (e) { delete httpWaiters[id]; reject(e); }
     });
@@ -638,7 +638,7 @@
     log('准备桌面');
     var p;
     if (window.FluxNet && FluxNet.request) {
-      p = nativeHttp('POST', url, '').then(function (txt) {
+      p = nativeHttp('POST', url, '', 25000).then(function (txt) {
         return { status: 200, ok: true, text: txt, via: 'native' };
       });
     } else {
@@ -681,7 +681,7 @@
     });
   }
 
-  function attach() {
+  function attachOnce() {
     return rpc('display.observe', {}).then(function (obs) {
       viewerId = obs.viewer_id;
       var url = 'wss://' + ctx.host + '/api/display/ws?display_ticket=' + encodeURIComponent(obs.ticket);
@@ -742,19 +742,31 @@
           setStatus('安全协商失败', 'err');
           settle(reject, new Error('安全协商失败: ' + reason));
         });
-        setTimeout(function () { settle(reject, new Error('画面连接超时')); }, 30000);
+        setTimeout(function () { settle(reject, new Error('画面连接超时')); }, 20000);
       });
+    });
+  }
+
+  /* 画面链路偶发第一次握手失败（刚启动的 VNC 还没就绪 / 边缘抖动）：本地快速重试一次，
+     不用把 bridge、网关全重走一遍，否则每次要多花十几秒 */
+  function attach() {
+    return attachOnce().catch(function (err) {
+      if (closing) throw err;
+      log('画面重试：' + ((err && err.message) || err), 'err');
+      var old = rfb;
+      rfb = null;                       // 先摘引用，避免 disconnect 触发整轮重连
+      if (old) { try { old.disconnect(); } catch (e) {} }
+      return new Promise(function (r) { setTimeout(r, 800); }).then(attachOnce);
     });
   }
 
   function attempt() {
     setStatus('连接中…');
     post({ phase: 'connecting', text: '连接中…' });
-    return bridgeStart()
-      .then(function () {
-        setStatus('连接网关…');
-        return openGateway();
-      })
+    /* 拉浏览器窗口只是旁路增强：和网关/桌面并行走，别再让它的网络卡顿把「连接中」拖长 */
+    bridgeStart();
+    setStatus('连接网关…');
+    return openGateway()
       .then(function () {
         setStatus('检查桌面…');
         return rpc('display.status', {});

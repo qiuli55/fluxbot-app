@@ -12,8 +12,8 @@ android {
         applicationId = "top.qiuli55.fluxbot"
         minSdk = 26
         targetSdk = 34
-        versionCode = 18
-        versionName = "0.3.6"
+        versionCode = 19
+        versionName = "0.3.7"
     }
 
     // 发布签名：CI 用仓库 secret 还原 keystore 后通过环境变量注入。

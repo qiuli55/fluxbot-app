@@ -1,9 +1,16 @@
 package top.qiuli55.fluxbot.screens
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -34,7 +41,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import org.json.JSONObject
 import top.qiuli55.fluxbot.data.BotDesktop
 import top.qiuli55.fluxbot.nav.LocalStore
@@ -47,11 +58,21 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
 
-/** 网页通过它把连接状态回吐给原生（见 assets/desktop/index.html 的 post()）。 */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+/** 网页通过它把连接状态回吐给原生，并借用原生能力（剪贴板/键盘/横屏/全屏）。 */
 private class HostBridge(
     private val handler: Handler,
+    private val context: Context,
+    private val webView: () -> WebView?,
     private val onUpdate: (text: String, control: Boolean) -> Unit,
     private val onLog: (String) -> Unit,
+    private val onFullscreen: (Boolean) -> Unit,
+    private val onLandscape: (Boolean) -> Unit,
 ) {
     @JavascriptInterface
     fun onState(json: String) {
@@ -64,6 +85,44 @@ private class HostBridge(
     @JavascriptInterface
     fun onLog(msg: String) {
         onLog(msg)
+    }
+
+    /** 桌面复制 → 手机剪贴板 */
+    @JavascriptInterface
+    fun setClipboard(text: String) {
+        runCatching {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("fluxbot-desktop", text))
+        }
+    }
+
+    /** 手机剪贴板 → 桌面（页面拿去做 clipboardPasteFrom） */
+    @JavascriptInterface
+    fun getClipboard(): String = runCatching {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = cm.primaryClip
+        if (clip == null || clip.itemCount <= 0) "" else clip.getItemAt(0).coerceToText(context).toString()
+    }.getOrDefault("")
+
+    /** 页面内 focus 拉不起软键盘时，由原生强制弹一次 */
+    @JavascriptInterface
+    fun showKeyboard() {
+        handler.post {
+            val wv = webView() ?: return@post
+            wv.requestFocus()
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            wv.postDelayed({ imm.showSoftInput(wv, InputMethodManager.SHOW_IMPLICIT) }, 120)
+        }
+    }
+
+    @JavascriptInterface
+    fun setFullscreen(on: Int) {
+        handler.post { onFullscreen(on != 0) }
+    }
+
+    @JavascriptInterface
+    fun setLandscape(on: Int) {
+        handler.post { onLandscape(on != 0) }
     }
 }
 
@@ -210,6 +269,16 @@ fun DesktopScreen(botId: String) {
 
     var state by remember { mutableStateOf("连接中…") }
     var control by remember { mutableStateOf(false) }
+    var fullscreen by remember { mutableStateOf(false) }
+    var landscape by remember { mutableStateOf(false) }
+    val activity = remember(view) { view.context.findActivity() }
+
+    /* 布局变化（横屏/全屏/键盘）后让页面重算画面尺寸 */
+    fun refitNow() {
+        handler.postDelayed({
+            holder[0]?.evaluateJavascript("window.Flux && window.Flux.refit()", null)
+        }, 350)
+    }
 
     val connectJs = remember(botId) {
         val args = listOf(
@@ -236,39 +305,76 @@ fun DesktopScreen(botId: String) {
             handler.removeCallbacks(tick)
             view.keepScreenOn = false
             holder[0]?.evaluateJavascript("window.Flux && window.Flux.disconnect()", null)
+            // 退出页面时恢复正常方向与系统栏，避免影响其它页面
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            activity?.window?.let { win ->
+                WindowCompat.getInsetsController(win, win.decorView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+            }
         }
     }
 
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Row(
-            Modifier.fillMaxWidth().height(54.dp).background(Flux.bg).padding(start = 6.dp, end = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconBtn(FIcon.Back) { ui.back() }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    bot?.name ?: "Bot 桌面",
-                    fontSize = 14.5.sp,
-                    fontWeight = FontWeight(560),
-                    color = Flux.text,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(profile, fontSize = 10.5.sp, color = Flux.text4, maxLines = 1)
+    /* 横屏：运行时切换方向（Manifest 里 portrait 只是默认值） */
+    DisposableEffect(landscape) {
+        activity?.requestedOrientation = if (landscape) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+        refitNow()
+        onDispose {}
+    }
+
+    /* 全屏：隐藏系统栏，页面里自带「退出全屏」按钮兜底 */
+    DisposableEffect(fullscreen) {
+        val win = activity?.window
+        if (win != null) {
+            val insets = WindowCompat.getInsetsController(win, win.decorView)
+            insets.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (fullscreen) {
+                insets.hide(WindowInsetsCompat.Type.systemBars())
+            } else {
+                insets.show(WindowInsetsCompat.Type.systemBars())
             }
-            Pill(
-                state,
-                color = if (control) Flux.accent else Flux.text2,
-                bg = if (control) Flux.accentSoft else Flux.panel2,
-            )
-            IconBtn(FIcon.Refresh) {
-                state = "重新连接…"
-                holder[0]?.evaluateJavascript("window.Flux && window.Flux.reconnect()", null)
+        }
+        refitNow()
+        onDispose {}
+    }
+
+    Column(Modifier.fillMaxSize().background(Color.Black)) {
+        if (!fullscreen) {
+            Row(
+                Modifier.fillMaxWidth().height(54.dp).background(Flux.bg)
+                    .padding(start = 6.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconBtn(FIcon.Back) { ui.back() }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        bot?.name ?: "Bot 桌面",
+                        fontSize = 14.5.sp,
+                        fontWeight = FontWeight(560),
+                        color = Flux.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(profile, fontSize = 10.5.sp, color = Flux.text4, maxLines = 1)
+                }
+                Pill(
+                    state,
+                    color = if (control) Flux.accent else Flux.text2,
+                    bg = if (control) Flux.accentSoft else Flux.panel2,
+                )
+                IconBtn(FIcon.Refresh) {
+                    state = "重新连接…"
+                    holder[0]?.evaluateJavascript("window.Flux && window.Flux.reconnect()", null)
+                }
             }
         }
 
         AndroidView(
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { refitNow() },
             factory = { ctx ->
                 var loaded = false
                 WebView(ctx).apply {
@@ -293,8 +399,12 @@ fun DesktopScreen(botId: String) {
                     addJavascriptInterface(
                         HostBridge(
                             handler,
+                            appCtx,
+                            { holder[0] },
                             onUpdate = { text, ctl -> state = text; control = ctl },
                             onLog = { remoteLog.send("[web] $it") },
+                            onFullscreen = { fullscreen = it },
+                            onLandscape = { landscape = it },
                         ),
                         "FluxHost",
                     )

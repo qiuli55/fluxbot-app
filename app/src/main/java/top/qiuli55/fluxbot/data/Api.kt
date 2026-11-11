@@ -9,8 +9,10 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.IOException
 import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
@@ -23,6 +25,17 @@ data class RemoteBot(
     val palette: String,
     val description: String,
     val taskId: String,
+    val chatTaskId: String = "",
+)
+
+/** 后端异步会话里的一轮对话。 */
+data class RemoteTurn(
+    val id: String,
+    val status: String,
+    val error: String,
+    val errorCode: String,
+    val replyText: String,
+    val userText: String,
 )
 
 /** 云端密钥库提供的一个可选模型；keyId 空表示运行时原生模型。 */
@@ -68,7 +81,11 @@ data class ConnectorPoll(
     val message: String,
 )
 
-class ApiException(message: String, val status: Int = 0) : Exception(message)
+class ApiException(
+    message: String,
+    val status: Int = 0,
+    val code: String = "",
+) : Exception(message)
 
 /** 与 optString 不同：JSONObject.NULL / 缺失字段都返回空串，而不是字面量 "null"。 */
 internal fun JSONObject.optStringOrEmpty(key: String): String =
@@ -340,6 +357,122 @@ class Api(context: Context) {
             }
         }
 
+    // ---------- Bot 异步会话 ----------
+
+    /** 发起一轮对话；client_turn_id 重复时后端直接返回同一轮（幂等）。 */
+    suspend fun startTurn(botId: String, content: String, clientTurnId: String): RemoteTurn =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject()
+                .put("content", content)
+                .put("client_turn_id", clientTurnId)
+            val data = request("POST", "/api/v1/bots/$botId/turns", body).getJSONObject("data")
+            parseTurn(data.getJSONObject("turn"))
+        }
+
+    /**
+     * 长轮询一轮对话的当前状态。
+     *
+     * 公网入口约 20 秒断开空闲连接，所以 wait 最多 15 秒，读超时留到 25 秒。
+     */
+    suspend fun pollTurn(botId: String, turnId: String, waitSeconds: Int = 15): RemoteTurn =
+        withContext(Dispatchers.IO) {
+            val data = request(
+                "GET",
+                "/api/v1/bots/$botId/turns/$turnId?wait=$waitSeconds",
+                null,
+                timeoutMs = 25_000,
+            ).getJSONObject("data")
+            parseTurn(data.getJSONObject("turn"))
+        }
+
+    /** 一直轮询到这一轮结束；容忍少量瞬时网络 / 网关错误。 */
+    suspend fun awaitTurn(
+        botId: String,
+        turnId: String,
+        overallTimeoutMs: Long = 15 * 60_000L,
+        onStatus: (String) -> Unit = {},
+    ): RemoteTurn {
+        val deadline = System.currentTimeMillis() + overallTimeoutMs
+        var lastStatus = ""
+        var failures = 0
+        while (System.currentTimeMillis() < deadline) {
+            val turn = try {
+                pollTurn(botId, turnId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: SocketTimeoutException) {
+                failures += 1
+                if (failures > 3) throw e
+                delay(backoffMillis(failures))
+                continue
+            } catch (e: ApiException) {
+                if (e.status != 502 && e.status != 503 && e.status != 504) throw e
+                failures += 1
+                if (failures > 3) throw e
+                delay(backoffMillis(failures))
+                continue
+            } catch (e: IOException) {
+                failures += 1
+                if (failures > 3) throw e
+                delay(backoffMillis(failures))
+                continue
+            }
+            failures = 0
+            if (turn.status != lastStatus) {
+                lastStatus = turn.status
+                onStatus(turn.status)
+            }
+            when (turn.status) {
+                "completed" -> return turn
+                "failed" -> throw ApiException(
+                    turnFailureMessage(turn),
+                    0,
+                    turn.errorCode,
+                )
+                "cancelled" -> throw ApiException(
+                    "这一轮已被取消",
+                    0,
+                    turn.errorCode,
+                )
+                // queued / running 以及未知状态都继续等
+            }
+        }
+        throw ApiException("等待回复超时")
+    }
+
+    /** 拉取 Bot 会话历史，返回 (role, content) 列表，只保留文本消息。 */
+    suspend fun conversation(botId: String, limit: Int = 50): List<Pair<String, String>> =
+        withContext(Dispatchers.IO) {
+            val data = request("GET", "/api/v1/bots/$botId/conversation?limit=$limit", null)
+                .optJSONObject("data") ?: JSONObject()
+            val messages = data.optJSONArray("messages") ?: JSONArray()
+            (0 until messages.length()).mapNotNull { index ->
+                val o = messages.optJSONObject(index) ?: return@mapNotNull null
+                val kind = o.optStringOrEmpty("kind")
+                if (kind.isNotEmpty() && kind != "text") return@mapNotNull null
+                o.optStringOrEmpty("role") to o.optStringOrEmpty("content")
+            }
+        }
+
+    private fun parseTurn(o: JSONObject) = RemoteTurn(
+        id = o.optStringOrEmpty("id"),
+        status = o.optStringOrEmpty("status"),
+        error = o.optStringOrEmpty("error"),
+        errorCode = o.optStringOrEmpty("error_code"),
+        replyText = o.optJSONObject("reply_message")
+            ?.optStringOrEmpty("content").orEmpty(),
+        userText = o.optJSONObject("user_message")
+            ?.optStringOrEmpty("content").orEmpty(),
+    )
+
+    private fun turnFailureMessage(turn: RemoteTurn): String = when (turn.errorCode) {
+        "budget_exhausted" -> "今日 token 预算已用完"
+        "interrupted" -> "服务器重启，这一轮被中断，请重发"
+        else -> turn.error.ifBlank { "模型返回异常" }
+    }
+
+    private fun backoffMillis(failures: Int): Long = minOf(1_000L * failures, 3_000L)
+
     /** 一条任务增量事件；seq 在同一任务内单调递增。 */
     data class TaskEvent(val seq: Int, val type: String, val data: JSONObject)
 
@@ -395,7 +528,7 @@ class Api(context: Context) {
             val success = root.optBoolean("success", code in 200..299)
             if (code !in 200..299 || !success) {
                 val msg = root.optStringOrEmpty("message").ifEmpty { "请求失败（HTTP $code）" }
-                throw ApiException(msg, code)
+                throw ApiException(msg, code, root.optStringOrEmpty("code"))
             }
             return root
         } finally {
@@ -425,6 +558,7 @@ class Api(context: Context) {
         palette = AvatarMap.toAppPalette(o.optStringOrEmpty("avatar_color")),
         description = o.optStringOrEmpty("description"),
         taskId = o.optStringOrEmpty("last_task_id").takeUnless { it == "null" }.orEmpty(),
+        chatTaskId = o.optStringOrEmpty("chat_task_id").takeUnless { it == "null" }.orEmpty(),
     )
 
     companion object {

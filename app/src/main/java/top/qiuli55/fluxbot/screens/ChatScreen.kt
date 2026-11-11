@@ -74,6 +74,7 @@ import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
 import top.qiuli55.fluxbot.ui.IconBtn
 import top.qiuli55.fluxbot.ui.PageHead
+import java.util.UUID
 
 private val CHIPS = listOf("总结未读消息", "安排今天", "查一下资料", "写一条周报")
 private val DockBg = Color(0xFF0D1013)
@@ -106,23 +107,28 @@ fun ChatScreen(botId: String) {
 
     LaunchedEffect(messages.size) { store.markRead(botId) }
 
-    // 远端 Bot：首次进入时拉取这个任务的历史消息。
+    // 远端 Bot：首次进入时拉取这个会话的历史消息。
     LaunchedEffect(botId) {
         val b = store.bot(botId) ?: return@LaunchedEffect
-        if (!b.remote || b.group || b.taskId.isEmpty() || b.messages.isNotEmpty()) return@LaunchedEffect
-        runCatching { store.api.listMessages(b.taskId) }.onSuccess { list ->
-            if (list.isEmpty()) return@onSuccess
-            val now = store.clock()
-            val history = list.mapIndexed { i, (role, content) ->
-                Message(
-                    id = "h-$botId-$i",
-                    role = if (role == "assistant") "bot" else "user",
-                    text = content,
-                    time = now,
-                )
-            }
-            store.replaceMessages(botId, history)
+        if (!b.remote || b.group || b.id.isBlank() || b.messages.isNotEmpty()) return@LaunchedEffect
+        val list = try {
+            store.api.conversation(b.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptyList()
         }
+        if (list.isEmpty()) return@LaunchedEffect
+        val now = store.clock()
+        val history = list.mapIndexed { i, (role, content) ->
+            Message(
+                id = "h-$botId-$i",
+                role = if (role == "assistant") "bot" else "user",
+                text = content,
+                time = now,
+            )
+        }
+        store.replaceMessages(botId, history)
     }
 
     val itemCount = 1 + messages.size +
@@ -139,7 +145,43 @@ fun ChatScreen(botId: String) {
         store.addMessage(botId, "user", text)
         store.setWorking(botId, true)
 
-        // 单聊一律交给 flux-bot 后端，用真实模型回复（不再本地模拟）。
+        // 远端 Bot 的单聊走异步会话接口：发起一轮 → 长轮询到结束。
+        if (!bot.group && bot.remote && bot.id.isNotBlank()) {
+            ui.scope.launch {
+                typing = true
+                try {
+                    val clientTurnId = UUID.randomUUID().toString()
+                    val started = try {
+                        store.api.startTurn(bot.id, text, clientTurnId)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        store.addMessage(botId, "bot", "发送失败：${e.message ?: "未知错误"}")
+                        return@launch
+                    }
+                    val turn = try {
+                        store.api.awaitTurn(bot.id, started.id) { status ->
+                            if (status == "running") typing = true
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        store.addMessage(botId, "bot", e.message ?: "模型返回异常")
+                        return@launch
+                    }
+                    typing = false
+                    val reply = turn.replyText.ifBlank { "模型没有返回内容" }
+                    store.addMessage(botId, "bot", reply)
+                    store.markRead(botId)
+                } finally {
+                    typing = false
+                    store.setWorking(botId, false)
+                }
+            }
+            return
+        }
+
+        // 本地 Bot 的单聊仍交给旧任务接口，用真实模型回复（不再本地模拟）。
         if (!bot.group) {
             ui.scope.launch {
                 typing = true

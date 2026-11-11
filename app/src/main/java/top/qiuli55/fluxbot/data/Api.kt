@@ -33,6 +33,36 @@ data class ModelCatalog(
     val options: List<RemoteModel>,
 )
 
+/** 一个外部连接器（当前只有 GitHub）。 */
+data class RemoteConnector(
+    val id: String,
+    val name: String,
+    val description: String,
+    val connected: Boolean,
+    val account: String,
+    val displayName: String,
+    val avatarUrl: String,
+    val scopes: List<String>,
+    val connectedAt: String,
+)
+
+/** 设备码登录的起始信息：用户在浏览器里输入 userCode 并授权。 */
+data class DeviceLogin(
+    val flowId: String,
+    val userCode: String,
+    val verificationUri: String,
+    val verificationUriComplete: String,
+    val expiresIn: Int,
+    val interval: Int,
+)
+
+/** 一次轮询结果：pending / success / expired / failed。 */
+data class ConnectorPoll(
+    val status: String,
+    val connector: RemoteConnector?,
+    val message: String,
+)
+
 class ApiException(message: String) : Exception(message)
 
 /**
@@ -144,6 +174,44 @@ class Api(context: Context) {
             request("POST", "/api/v1/tasks/$taskId/model", body)
         }
 
+    // ---------- 外部连接器 ----------
+
+    /** 当前本地账号的连接器清单（服务端按 X-Flux-Account 隔离）。 */
+    suspend fun listConnectors(): List<RemoteConnector> = withContext(Dispatchers.IO) {
+        val data = request("GET", "/api/v1/connectors", null).optJSONArray("data") ?: JSONArray()
+        (0 until data.length()).map { parseConnector(data.getJSONObject(it)) }
+    }
+
+    /** 发起 GitHub 设备码登录。 */
+    suspend fun startGithubLogin(): DeviceLogin = withContext(Dispatchers.IO) {
+        val data = request("POST", "/api/v1/connectors/github/login/start", JSONObject())
+            .getJSONObject("data")
+        DeviceLogin(
+            flowId = data.getString("flow_id"),
+            userCode = data.optString("user_code"),
+            verificationUri = data.optString("verification_uri", "https://github.com/login/device"),
+            verificationUriComplete = data.optString("verification_uri_complete"),
+            expiresIn = data.optInt("expires_in", 900),
+            interval = data.optInt("interval", 5),
+        )
+    }
+
+    /** 轮询设备码授权结果；服务端会按 GitHub 返回的 interval 限流。 */
+    suspend fun pollGithubLogin(flowId: String): ConnectorPoll = withContext(Dispatchers.IO) {
+        val data = request("GET", "/api/v1/connectors/github/login/$flowId", null)
+            .getJSONObject("data")
+        ConnectorPoll(
+            status = data.optString("status"),
+            connector = data.optJSONObject("connector")?.let(::parseConnector),
+            message = data.optString("message"),
+        )
+    }
+
+    /** 断开当前账号的 GitHub 连接（只删服务端记录，不影响 GitHub 上的授权本身）。 */
+    suspend fun disconnectGithub(): RemoteConnector = withContext(Dispatchers.IO) {
+        parseConnector(request("DELETE", "/api/v1/connectors/github", null).getJSONObject("data"))
+    }
+
     /** 远端 Bot 的默认模型（定时开工也用它）；model 留空 = 清掉覆盖。 */
     suspend fun updateBotModel(botId: String, model: String, keyId: String?) =
         withContext(Dispatchers.IO) {
@@ -251,6 +319,10 @@ class Api(context: Context) {
             readTimeout = timeoutMs
             setRequestProperty("Accept", "application/json")
             if (token.isNotEmpty()) setRequestProperty("Authorization", "Bearer $token")
+            // 本地账号隔离：服务端用它区分连接器记录（将来接真实登录后改为令牌 subject）
+            accountId?.takeIf { it.isNotBlank() }?.let {
+                setRequestProperty("X-Flux-Account", it)
+            }
         }
         try {
             if (body != null) {
@@ -276,6 +348,21 @@ class Api(context: Context) {
         } finally {
             conn.disconnect()
         }
+    }
+
+    private fun parseConnector(o: JSONObject): RemoteConnector {
+        val scopes = o.optJSONArray("scopes") ?: JSONArray()
+        return RemoteConnector(
+            id = o.optString("id"),
+            name = o.optString("name"),
+            description = o.optString("description"),
+            connected = o.optBoolean("connected"),
+            account = o.optString("account"),
+            displayName = o.optString("display_name"),
+            avatarUrl = o.optString("avatar_url"),
+            scopes = (0 until scopes.length()).map { scopes.optString(it) },
+            connectedAt = o.optString("connected_at"),
+        )
     }
 
     private fun parseBot(o: JSONObject) = RemoteBot(

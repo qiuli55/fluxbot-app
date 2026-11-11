@@ -17,6 +17,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,6 +29,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import top.qiuli55.fluxbot.data.RemoteConnector
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Route
@@ -43,6 +49,30 @@ fun AccountScreen() {
     val acc = store.current()
     val account = acc.account
     val accounts = store.state.accounts
+    // 连接器状态在服务端（按账号隔离），进页面拉一次；失败时仍给出 GitHub 入口，
+    // 用户点进去还能重试，不把整块藏起来。
+    var connectors by remember { mutableStateOf<List<RemoteConnector>>(emptyList()) }
+    var connectorsFailed by remember { mutableStateOf(false) }
+    // 弹层关闭后再拉一次：刚在弹层里连接/断开的连接器状态要立刻反映到这一行。
+    val sheetOpen = ui.sheet != null
+    LaunchedEffect(account.id, sheetOpen) {
+        if (sheetOpen) return@LaunchedEffect
+        connectorsFailed = false
+        runCatching { store.api.listConnectors() }
+            .onSuccess { connectors = it }
+            .onFailure { connectorsFailed = true }
+    }
+    val github = connectors.firstOrNull { it.id == "github" } ?: RemoteConnector(
+        id = "github",
+        name = "GitHub",
+        description = "代码仓库、Issue、PR 与 Actions",
+        connected = false,
+        account = "",
+        displayName = "",
+        avatarUrl = "",
+        scopes = emptyList(),
+        connectedAt = "",
+    )
 
     Column(Modifier.fillMaxSize().background(Flux.bg)) {
         PageHead("账户", onBack = { ui.back() })
@@ -107,6 +137,42 @@ fun AccountScreen() {
                     onClick = { ui.sheet = Sheet.Subscription },
                 )
             }
+
+            SectionLabel("连接器")
+            FluxCard {
+                ItemRow(
+                    title = github.name,
+                    sub = when {
+                        github.connected -> "已连接 · @${github.account}"
+                        connectorsFailed -> "状态获取失败，点进去重试"
+                        else -> "未连接 · ${github.description}"
+                    },
+                    leading = {
+                        InitialsAvatar(
+                            if (github.connected && github.account.isNotEmpty()) {
+                                github.account.take(2).uppercase()
+                            } else {
+                                "GH"
+                            },
+                            36.dp,
+                            accent = github.connected,
+                        )
+                    },
+                    trailing = {
+                        RowValue(if (github.connected) "已连接" else "连接")
+                        Spacer(Modifier.width(6.dp))
+                        RowChevron()
+                    },
+                    onClick = { ui.sheet = Sheet.Connector(github.id) },
+                )
+            }
+            Text(
+                "外部连接器都从这里管理，授权按当前账户隔离。",
+                fontSize = 11.5.sp,
+                color = Flux.text4,
+                lineHeight = 19.sp,
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp),
+            )
 
             SectionLabel("切换账户")
             FluxCard {

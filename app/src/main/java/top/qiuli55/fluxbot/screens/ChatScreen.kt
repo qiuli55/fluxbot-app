@@ -149,7 +149,10 @@ fun ChatScreen(botId: String) {
                         )
                         store.setTaskId(botId, taskId)
                     }
-                    val reply = store.api.sendMessage(taskId, text)
+                    // 触发后端回答；回复从增量事件轮询取回（公网入口 20 秒就会断开空闲连接）
+                    val seq = store.api.lastSeq(taskId)
+                    ui.scope.launch { runCatching { store.api.sendMessage(taskId, text) } }
+                    val reply = store.api.waitForReply(taskId, seq)
                     typing = false
                     store.addMessage(botId, "bot", reply)
                     store.markRead(botId)
@@ -184,7 +187,9 @@ fun ChatScreen(botId: String) {
                                 )
                                 store.setTaskId(member.id, taskId)
                             }
-                            val reply = store.api.sendMessage(taskId, text)
+                            val seq = store.api.lastSeq(taskId)
+                            ui.scope.launch { runCatching { store.api.sendMessage(taskId, text) } }
+                            val reply = store.api.waitForReply(taskId, seq)
                             store.addMessage(botId, "bot", reply, sender = member.name)
                             store.markRead(botId)
                         } catch (e: Exception) {

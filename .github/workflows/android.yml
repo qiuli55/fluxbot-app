@@ -101,6 +101,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Upload release mapping
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxbot-mapping-${{ github.ref_name }}
+          path: app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 30
+
       # Release 资产走 objects.githubusercontent.com，下载速度远高于 Actions artifact；
       # deploy/release.sh 就从这里取包再镜像给 B 机。
       - name: Publish APK to GitHub Release

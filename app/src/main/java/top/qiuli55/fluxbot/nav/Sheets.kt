@@ -64,6 +64,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Api
 import top.qiuli55.fluxbot.data.Bot
+import top.qiuli55.fluxbot.data.ModelCatalog
+import top.qiuli55.fluxbot.data.VaultSecrets
 import top.qiuli55.fluxbot.ip.FloAvatarStill
 import top.qiuli55.fluxbot.screens.BotAvatar
 import top.qiuli55.fluxbot.ui.EmptyCard
@@ -87,6 +89,7 @@ sealed interface Sheet {
     data object Devices : Sheet
     data class Computer(val botId: String) : Sheet
     data class Permissions(val botId: String) : Sheet
+    data class Model(val botId: String) : Sheet
     data object Timezone : Sheet
     data object Appearance : Sheet
     data object Language : Sheet
@@ -219,6 +222,7 @@ private fun SheetBody(sheet: Sheet) {
         Sheet.Devices -> DevicesSheet()
         is Sheet.Computer -> ComputerSheet(sheet.botId)
         is Sheet.Permissions -> PermissionsSheet(sheet.botId)
+        is Sheet.Model -> ModelSheet(sheet.botId)
         Sheet.Timezone -> TimezoneSheet()
         Sheet.Appearance -> AppearanceSheet()
         Sheet.Language -> LanguageSheet()
@@ -545,6 +549,73 @@ private fun ComputerSheet(botId: String) {
                 ui.showToast("Bot 电脑已切换到 $name")
             }
         }
+    }
+}
+
+@Composable
+private fun ModelSheet(botId: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val scope = rememberCoroutineScope()
+    val bot = store.bot(botId) ?: return
+    var catalog by remember { mutableStateOf<ModelCatalog?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf("") }
+
+    // 列表与 Web 端同源：GET /dsh/models 的原生模型 + 密钥库模型
+    LaunchedEffect(botId) {
+        runCatching { store.api.listModels() }
+            .onSuccess { catalog = it }
+            .onFailure { error = it.message ?: "未知错误" }
+        loading = false
+    }
+
+    fun apply(model: String, keyId: String, label: String) {
+        val oldModel = bot.model
+        val oldKey = bot.modelKeyId
+        store.setModel(botId, model, keyId)
+        ui.haptic(8)
+        scope.launch {
+            val taskId = store.bot(botId)?.taskId.orEmpty()
+            val ok = runCatching {
+                if (bot.remote) store.api.updateBotModel(botId, model, keyId.takeIf { it.isNotBlank() })
+                if (taskId.isNotEmpty()) {
+                    store.api.setTaskModel(taskId, model, keyId.takeIf { it.isNotBlank() })
+                }
+            }.isSuccess
+            if (ok) {
+                if (ui.sheet is Sheet.Model) ui.closeSheet()
+                ui.showToast("已切换到 $label")
+            } else {
+                store.setModel(botId, oldModel, oldKey)
+                ui.showToast("云端没有接受这个模型，已还原")
+            }
+        }
+    }
+
+    SheetFrame("模型") {
+        SheetHint("列表来自云端密钥库；选中的是这个 Bot 的路由模型。", top = 0)
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
+        OptionRow(
+            title = "跟随默认",
+            sub = "平台默认通道 · ${catalog?.defaultModel?.ifBlank { "运行时默认" } ?: "读取中"}",
+            selected = bot.model.isBlank(),
+        ) { apply("", "", "跟随默认") }
+        catalog?.options.orEmpty().forEach { option ->
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
+            OptionRow(
+                title = option.model,
+                sub = "来自密钥库 · ${option.keyName}",
+                selected = bot.model == option.model && bot.modelKeyId == option.keyId,
+            ) { apply(option.model, option.keyId, option.model) }
+        }
+        when {
+            loading -> SheetHint("正在从云端读取模型…", top = 12)
+            error.isNotBlank() -> SheetHint("读取失败：$error", top = 12)
+            catalog?.options?.isEmpty() == true -> SheetHint("云端还没有可用的路由模型。", top = 12)
+        }
+        SheetHint("执行中的对话会等当前这一轮结束后再切换。")
     }
 }
 
@@ -1272,6 +1343,9 @@ private fun BotMenuSheet(botId: String) {
     val scope = rememberCoroutineScope()
     val bot = store.bot(botId) ?: return
     SheetFrame(bot.name) {
+        if (!bot.group) {
+            MenuItem("模型") { ui.sheet = Sheet.Model(botId) }
+        }
         MenuItem("重命名") { ui.sheet = Sheet.RenameBot(botId) }
         MenuItem("标记为已读") {
             store.markRead(botId)

@@ -19,6 +19,19 @@ data class RemoteBot(
     val taskId: String,
 )
 
+/** 云端密钥库提供的一个可选模型；keyId 空表示运行时原生模型。 */
+data class RemoteModel(
+    val model: String,
+    val keyName: String,
+    val keyId: String,
+)
+
+/** 云端模型目录：默认模型 + 可选路由模型（与 Web 端同一个筛选源）。 */
+data class ModelCatalog(
+    val defaultModel: String,
+    val options: List<RemoteModel>,
+)
+
 class ApiException(message: String) : Exception(message)
 
 /**
@@ -94,6 +107,8 @@ class Api(context: Context) {
         botName: String,
         shape: String,
         palette: String,
+        model: String = "",
+        keyId: String = "",
     ): String = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("description", description)
@@ -101,8 +116,44 @@ class Api(context: Context) {
             .put("bot_name", botName)
             .put("avatar_shape", AvatarMap.toServerShape(shape))
             .put("avatar_color", AvatarMap.toServerPalette(palette))
+        if (model.isNotBlank()) body.put("model", model)
+        if (keyId.isNotBlank()) body.put("key_id", keyId)
         request("POST", "/api/v1/tasks", body).getJSONObject("data").getString("id")
     }
+
+    /** 云端模型目录：与 Web 端同一个筛选源（原生模型 + 密钥库模型）。 */
+    suspend fun listModels(): ModelCatalog = withContext(Dispatchers.IO) {
+        val data = request("GET", "/api/v1/dsh/models", null).getJSONObject("data")
+        val items = data.optJSONArray("key_models") ?: JSONArray()
+        val options = (0 until items.length()).mapNotNull {
+            val o = items.getJSONObject(it)
+            val model = o.optString("model").trim()
+            val keyId = o.optString("key_id").trim()
+            if (model.isEmpty() || keyId.isEmpty()) null
+            else RemoteModel(model, o.optString("key_name"), keyId)
+        }
+        ModelCatalog(data.optString("model"), options)
+    }
+
+    /** 切换已有对话（任务）的模型；model 留空 = 回到平台默认。 */
+    suspend fun setTaskModel(taskId: String, model: String, keyId: String?) =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject().put("model", model)
+            if (!keyId.isNullOrBlank() && model.isNotBlank()) body.put("key_id", keyId)
+            request("POST", "/api/v1/tasks/$taskId/model", body)
+        }
+
+    /** 远端 Bot 的默认模型（定时开工也用它）；model 留空 = 清掉覆盖。 */
+    suspend fun updateBotModel(botId: String, model: String, keyId: String?) =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject()
+            if (model.isBlank()) {
+                body.put("model", JSONObject.NULL).put("key_id", JSONObject.NULL)
+            } else {
+                body.put("model", model).put("key_id", keyId ?: JSONObject.NULL)
+            }
+            request("PATCH", "/api/v1/bots/$botId", body)
+        }
 
     /** 发一条聊天消息，返回模型的回复文本。 */
     suspend fun sendMessage(taskId: String, content: String): String =

@@ -70,6 +70,9 @@ data class Bot(
     val taskId: String = "",
     val remote: Boolean = false,
     val library: List<LibraryEntry> = emptyList(),
+    /** 云端路由模型（空 = 跟随平台默认）；modelKeyId 指向密钥库条目。 */
+    val model: String = "",
+    val modelKeyId: String = "",
 )
 
 data class Settings(
@@ -180,6 +183,8 @@ fun Bot.toJson() = JSONObject()
     .put("taskId", taskId)
     .put("remote", remote)
     .put("library", JSONArray().apply { library.forEach { put(it.toJson()) } })
+    .put("model", model)
+    .put("modelKeyId", modelKeyId)
 
 fun botFromJson(o: JSONObject) = Bot(
     id = o.getString("id"), name = o.getString("name"), seed = o.getString("seed"),
@@ -201,6 +206,8 @@ fun botFromJson(o: JSONObject) = Bot(
     library = o.optJSONArray("library")
         ?.let { a -> (0 until a.length()).map { libraryFromJson(a.getJSONObject(it)) } }
         ?: emptyList(),
+    model = o.optString("model"),
+    modelKeyId = o.optString("modelKeyId"),
 )
 
 fun Settings.toJson() = JSONObject()

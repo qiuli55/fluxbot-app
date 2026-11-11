@@ -254,6 +254,18 @@ private class NetProbe(
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun DesktopScreen(botId: String) {
+    if (!BotDesktop.isConfigured) {
+        Column(Modifier.fillMaxSize().background(Flux.bg).padding(24.dp)) {
+            Text(
+                "云桌面未配置：构建时需注入 FLUXBOT_DESKTOP_* 参数",
+                fontSize = 13.sp,
+                color = Flux.text2,
+                lineHeight = 21.sp,
+            )
+        }
+        return
+    }
+
     val store = LocalStore.current
     val ui = LocalUi.current
     val bot = store.bot(botId)

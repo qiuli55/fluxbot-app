@@ -93,8 +93,7 @@ class Api(context: Context) {
         }
 
     var token: String
-        get() = (secure.get(tokenKey) ?: secure.get(SYS_TOKEN_KEY) ?: migrateLegacyToken() ?: DEFAULT_TOKEN)
-            .ifBlank { DEFAULT_TOKEN }
+        get() = secure.get(tokenKey) ?: secure.get(SYS_TOKEN_KEY) ?: migrateLegacyToken() ?: ""
         set(value) {
             secure.put(tokenKey, value.trim())
             prefs.edit().remove("token").apply()
@@ -318,7 +317,7 @@ class Api(context: Context) {
             connectTimeout = 15_000
             readTimeout = timeoutMs
             setRequestProperty("Accept", "application/json")
-            if (token.isNotEmpty()) setRequestProperty("Authorization", "Bearer $token")
+            if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
             // 本地账号隔离：服务端用它区分连接器记录（将来接真实登录后改为令牌 subject）
             accountId?.takeIf { it.isNotBlank() }?.let {
                 setRequestProperty("X-Flux-Account", it)
@@ -379,7 +378,6 @@ class Api(context: Context) {
         private const val SYS_TOKEN_KEY = "sys.api_token"
 
         const val DEFAULT_BASE_URL = "https://flux.qiuli55.top/bot"
-        const val DEFAULT_TOKEN = "fb_2f9c7a41d8e34b6fa05c"
     }
 }
 

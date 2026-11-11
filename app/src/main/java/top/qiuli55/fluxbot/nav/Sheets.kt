@@ -1012,9 +1012,9 @@ private fun ServerSheet() {
         Spacer(Modifier.height(10.dp))
         SecondaryButton("恢复默认地址") {
             url = Api.DEFAULT_BASE_URL
-            token = Api.DEFAULT_TOKEN
+            token = ""
         }
-        SheetHint("令牌只保存在本机，测试账号已预填。")
+        SheetHint("令牌只保存在本机，请填写服务器提供的访问令牌。")
     }
 }
 

@@ -13,11 +13,16 @@ import kotlin.random.Random
 class Store(context: Context) {
 
     private val prefs = context.getSharedPreferences("fluxbot.v1", Context.MODE_PRIVATE)
+    private val secure = SecureStore(context)
 
     val api = Api(context)
 
     var state by mutableStateOf(load() ?: DemoData.seed())
         private set
+
+    init {
+        api.accountId = state.currentId
+    }
 
     private fun load(): AppState? = prefs.getString("data", null)?.let {
         runCatching { appStateFromJson(JSONObject(it)) }.getOrNull()
@@ -39,26 +44,34 @@ class Store(context: Context) {
 
     // ---------- 账户 ----------
 
-    fun login(accountId: String? = null) = update {
-        it.copy(currentId = accountId ?: it.currentId, loggedIn = true)
+    fun login(accountId: String? = null) {
+        update { it.copy(currentId = accountId ?: it.currentId, loggedIn = true) }
+        api.accountId = state.currentId
     }
 
     fun logout() = update { it.copy(loggedIn = false) }
 
-    fun switchAccount(id: String) = update { it.copy(currentId = id, loggedIn = true) }
+    fun switchAccount(id: String) {
+        update { it.copy(currentId = id, loggedIn = true) }
+        api.accountId = id
+    }
 
     fun addAccount(email: String, name: String): String {
         val acc = DemoData.newAccount(email, name)
         update { it.copy(accounts = it.accounts + acc, currentId = acc.account.id, loggedIn = true) }
+        api.accountId = state.currentId
         return acc.account.id
     }
 
     fun deleteAccount(id: String) {
+        // 该账号名下的访问令牌与全部保管库密文一并销毁
+        secure.removePrefix("acc.$id.")
         update { s ->
             val left = s.accounts.filterNot { it.account.id == id }
             val accounts = if (left.isEmpty()) listOf(DemoData.mainAccount()) else left
             AppState(accounts, accounts.first().account.id, s.loggedIn)
         }
+        api.accountId = state.currentId
     }
 
     private fun updateCur(transform: (AccountState) -> AccountState) {
@@ -245,11 +258,22 @@ class Store(context: Context) {
 
     // ---------- 保管库 / 应用 ----------
 
-    fun addVault(cat: String, title: String, sub: String) = updateCur {
-        it.copy(vault = listOf(VaultItem("v-${System.nanoTime()}", cat, title, sub)) + it.vault)
+    /** 读取某条保管库记录的密文（密码 / 卡后四位等），只在需要时按需解密。 */
+    fun vaultSecret(id: String): VaultSecrets? =
+        secure.getJson("acc.${state.currentId}.vault.$id")?.let(VaultSecrets::from)
+
+    /** 新增一条保管库记录；秘密字段加密落盘，明文不进 fluxbot.v1。 */
+    fun addVault(cat: String, title: String, sub: String, secret: VaultSecrets? = null): String {
+        val id = "v-${System.nanoTime()}"
+        if (secret != null) secure.putJson("acc.${state.currentId}.vault.$id", secret.toJson())
+        updateCur { it.copy(vault = listOf(VaultItem(id, cat, title, sub)) + it.vault) }
+        return id
     }
 
-    fun deleteVault(id: String) = updateCur { acc -> acc.copy(vault = acc.vault.filterNot { it.id == id }) }
+    fun deleteVault(id: String) {
+        secure.remove("acc.${state.currentId}.vault.$id")
+        updateCur { acc -> acc.copy(vault = acc.vault.filterNot { it.id == id }) }
+    }
 
     fun toggleApp(appId: String) = updateCur {
         val on = it.connected.contains(appId)

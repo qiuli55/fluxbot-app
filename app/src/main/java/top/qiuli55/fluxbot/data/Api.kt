@@ -24,11 +24,18 @@ class ApiException(message: String) : Exception(message)
 /**
  * flux-bot 后端的最小客户端：只依赖 HttpURLConnection + org.json，不引入新依赖。
  *
- * 服务器地址与令牌存在独立的 SharedPreferences 里，首次启动预填测试机地址。
+ * 服务器地址存在普通 SharedPreferences；访问令牌属于登录态，按账号用 Keystore 加密保存。
  */
 class Api(context: Context) {
 
     private val prefs = context.getSharedPreferences("fluxbot.api", Context.MODE_PRIVATE)
+    private val secure = SecureStore(context)
+
+    /** 当前账号；令牌按账号隔离，切账号时由 Store 更新。 */
+    var accountId: String? = null
+
+    private val tokenKey: String
+        get() = accountId?.let { "acc.$it.api_token" } ?: SYS_TOKEN_KEY
 
     var baseUrl: String
         get() {
@@ -42,10 +49,21 @@ class Api(context: Context) {
         }
 
     var token: String
-        get() = prefs.getString("token", DEFAULT_TOKEN) ?: DEFAULT_TOKEN
+        get() = (secure.get(tokenKey) ?: secure.get(SYS_TOKEN_KEY) ?: migrateLegacyToken() ?: DEFAULT_TOKEN)
+            .ifBlank { DEFAULT_TOKEN }
         set(value) {
-            prefs.edit().putString("token", value.trim()).apply()
+            secure.put(tokenKey, value.trim())
+            prefs.edit().remove("token").apply()
         }
+
+    /** 旧版本把令牌明文放在 SharedPreferences 里，读到后立刻迁进 Keystore 并清掉明文。 */
+    private fun migrateLegacyToken(): String? {
+        val old = prefs.getString("token", null)?.trim().orEmpty()
+        if (old.isEmpty()) return null
+        secure.put(SYS_TOKEN_KEY, old)
+        prefs.edit().remove("token").apply()
+        return old
+    }
 
     suspend fun health(): Boolean = withContext(Dispatchers.IO) {
         request("GET", "/api/v1/health", null).optBoolean("success", true)
@@ -163,6 +181,9 @@ class Api(context: Context) {
     )
 
     companion object {
+        /** 未登录 / 未绑定账号时使用的全局令牌。 */
+        private const val SYS_TOKEN_KEY = "sys.api_token"
+
         const val DEFAULT_BASE_URL = "https://flux.qiuli55.top/bot"
         const val DEFAULT_TOKEN = "fb_2f9c7a41d8e34b6fa05c"
     }

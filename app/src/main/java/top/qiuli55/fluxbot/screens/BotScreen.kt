@@ -232,6 +232,16 @@ private fun SettingsPane(bot: Bot) {
             onClick = { ui.sheet = Sheet.Permissions(bot.id) },
         )
         ItemRow(
+            title = "资料库",
+            sub = "Bot 和群聊在任务里看过的网页",
+            trailing = {
+                RowValue(bot.library.size.toString())
+                Spacer(Modifier.width(6.dp))
+                RowChevron()
+            },
+            onClick = { ui.push(Route.Library(bot.id)) },
+        )
+        ItemRow(
             title = "自动记录记忆",
             sub = "从对话里自动提取偏好与习惯",
             trailing = {

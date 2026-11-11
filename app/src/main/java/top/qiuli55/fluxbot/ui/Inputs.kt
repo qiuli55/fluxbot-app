@@ -33,6 +33,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
@@ -87,6 +89,7 @@ fun FluxInput(
     fontSize: TextUnit = 14.sp,
     center: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
+    password: Boolean = false,
 ) {
     val align = if (center) TextAlign.Center else TextAlign.Start
     val interaction = remember { MutableInteractionSource() }
@@ -111,6 +114,8 @@ fun FluxInput(
             ),
             cursorBrush = SolidColor(Flux.accent),
             keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+            visualTransformation =
+                if (password) PasswordVisualTransformation() else VisualTransformation.None,
             interactionSource = interaction,
             modifier = Modifier.fillMaxWidth(),
             decorationBox = { inner ->

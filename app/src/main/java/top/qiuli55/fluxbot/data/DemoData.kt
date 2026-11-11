@@ -37,6 +37,21 @@ object DemoData {
 
     private val allPerms = mapOf("files" to true, "shell" to true, "network" to true, "apps" to true)
 
+    private fun lib(id: String, title: String, host: String, mark: String, bg: Long, fg: Long = 0xFFFFFFFF) =
+        LibraryEntry(id = id, title = title, host = host, mark = mark, bg = bg, fg = fg)
+
+    private fun mainLibrary() = listOf(
+        lib("lib-gate", "gate.com/zh/news/detail/byt…", "www.gate.com", "G", 0xFF17A34A),
+        lib("lib-seed", "seed.bytedance.com/zh/seed…", "seed.bytedance.com", "S", 0xFF1D3F8F),
+        lib("lib-sedaily", "en.sedaily.com/finance/2026…", "en.sedaily.com", "S", 0xFF1B4B9C),
+        lib("lib-asiae", "asiae.co.kr/en/article/202611…", "www.asiae.co.kr", "A", 0xFFC41E24),
+        lib("lib-qoder", "docs.qoder.com/zh/events/q…", "docs.qoder.com", "Q", 0xFF111417),
+        lib("lib-aibase", "news.aibase.com/news/32130", "news.aibase.com", "AI", 0xFF2C6BED),
+        lib("lib-donews", "donews.com/news/detail/1/6…", "www.donews.com", "D", 0xFFD8232A),
+        lib("lib-antling-1", "developer.ant-ling.com/en/do…", "developer.ant-ling.com", "", 0xFF23282D),
+        lib("lib-antling-2", "developer.ant-ling.com/en/do…", "developer.ant-ling.com", "", 0xFF23282D),
+    )
+
     private fun mainMessages() = listOf(
         msg("m1", "bot", "09:12", "早上好。昨晚的构建全部通过，3 个失败用例重跑后也绿了。今天先做哪一件？"),
         msg("m2", "user", "09:14", "先把未读消息汇总一下，20:00 提醒我复盘。"),
@@ -74,6 +89,7 @@ object DemoData {
                     rt("rt-3", "生成本周复盘", "09:00", "每周一", false),
                 ),
                 permissions = allPerms, autoMemory = true,
+                library = mainLibrary(),
             ),
             Bot(
                 id = "b-report", name = "汇报和统帅", seed = "b-report", shape = "star", palette = "plum",

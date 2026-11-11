@@ -25,6 +25,7 @@ enum class FIcon {
     Copy, Send, Spark, Clock, Layers, Key, Shield, Monitor, Bell, Palette, Globe,
     Vibrate, Help, Doc, Flag, Logout, Link, Lock, User, Wallet, Contact, External,
     Refresh, Pencil, ArrowUpRight, Chat, Cpu, Mic, Heart,
+    Eye, ArrowsUpDown, Cursor, ListDots, ZoomIn, Keyboard, Clipboard, Trackpad, Undo,
 }
 
 @Composable
@@ -286,6 +287,59 @@ private fun DrawScope.drawIcon(icon: FIcon, color: Color, w: Float) {
             cubicTo(17.4f, 5.6f, 19.2f, 7.4f, 19.2f, 9.9f)
             cubicTo(19.2f, 14.2f, 13.4f, 18.1f, 12f, 19.3f)
             close()
+        }
+        FIcon.Eye -> {
+            path {
+                moveTo(2.8f, 12f)
+                cubicTo(5.2f, 7.6f, 8.4f, 5.6f, 12f, 5.6f)
+                cubicTo(15.6f, 5.6f, 18.8f, 7.6f, 21.2f, 12f)
+                cubicTo(18.8f, 16.4f, 15.6f, 18.4f, 12f, 18.4f)
+                cubicTo(8.4f, 18.4f, 5.2f, 16.4f, 2.8f, 12f)
+                close()
+            }
+            circle(12f, 12f, 3.1f)
+        }
+        FIcon.ArrowsUpDown -> {
+            line(12f, 4.2f, 12f, 19.8f)
+            path { moveTo(8.6f, 7.6f); lineTo(12f, 4.2f); lineTo(15.4f, 7.6f) }
+            path { moveTo(8.6f, 16.4f); lineTo(12f, 19.8f); lineTo(15.4f, 16.4f) }
+        }
+        FIcon.Cursor -> path {
+            moveTo(6.4f, 3.8f); lineTo(19f, 11.6f); lineTo(12.7f, 12.9f); lineTo(10f, 19.4f); close()
+        }
+        FIcon.ListDots -> {
+            listOf(7f, 12f, 17f).forEach { y ->
+                dot(5.4f, y, 1.3f)
+                line(9.4f, y, 19f, y)
+            }
+        }
+        FIcon.ZoomIn -> {
+            circle(11f, 11f, 6.2f)
+            line(15.6f, 15.6f, 20f, 20f)
+            line(8.4f, 11f, 13.6f, 11f)
+            line(11f, 8.4f, 11f, 13.6f)
+        }
+        FIcon.Keyboard -> {
+            rect(2.6f, 6f, 21.4f, 18f, 2.6f)
+            listOf(6f, 9.4f, 12.8f, 16.2f, 18.6f).forEach { x -> dot(x, 9.4f, 0.85f) }
+            line(8.2f, 14.4f, 15.8f, 14.4f)
+        }
+        FIcon.Clipboard -> {
+            rect(5.4f, 5.2f, 18.6f, 20.6f, 2.4f)
+            rect(9f, 3.2f, 15f, 6.4f, 1.2f)
+            line(9.4f, 10.6f, 14.6f, 10.6f)
+            line(9.4f, 14.2f, 14.6f, 14.2f)
+            line(9.4f, 17.4f, 13f, 17.4f)
+        }
+        FIcon.Trackpad -> { rect(2.8f, 4.6f, 21.2f, 19.4f, 3.2f); dot(7.4f, 9.4f, 1.15f) }
+        FIcon.Undo -> {
+            path { moveTo(9.4f, 6.4f); lineTo(5.2f, 10.6f); lineTo(9.4f, 14.8f) }
+            path {
+                moveTo(5.2f, 10.6f); lineTo(14.4f, 10.6f)
+                cubicTo(17.2f, 10.6f, 19.2f, 12.6f, 19.2f, 15.2f)
+                cubicTo(19.2f, 17.8f, 17.2f, 19.8f, 14.4f, 19.8f)
+                lineTo(11.6f, 19.8f)
+            }
         }
     }
 }

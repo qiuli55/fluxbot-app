@@ -53,6 +53,7 @@ import org.json.JSONObject
 import top.qiuli55.fluxbot.data.BotDesktop
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
+import top.qiuli55.fluxbot.nav.Sheet
 import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
 import top.qiuli55.fluxbot.ui.IconBtn
@@ -387,6 +388,7 @@ fun DesktopScreen(botId: String) {
                     color = if (control) Flux.accent else Flux.text2,
                     bg = if (control) Flux.accentSoft else Flux.panel2,
                 )
+                IconBtn(FIcon.Help) { ui.sheet = Sheet.UseComputer }
                 IconBtn(FIcon.Refresh) {
                     state = "重新连接…"
                     holder[0]?.evaluateJavascript("window.Flux && window.Flux.reconnect()", null)

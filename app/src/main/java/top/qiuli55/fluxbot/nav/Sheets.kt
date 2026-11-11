@@ -93,7 +93,9 @@ sealed interface Sheet {
     data class Info(val kind: String) : Sheet
     data object Feedback : Sheet
     data object Server : Sheet
+    data object UseComputer : Sheet
     data class VaultAdd(val cat: String) : Sheet
+    data class VaultDetail(val itemId: String) : Sheet
     data class MemoryAdd(val botId: String) : Sheet
     data class RoutineAdd(val botId: String) : Sheet
     data class RenameBot(val botId: String) : Sheet
@@ -223,7 +225,9 @@ private fun SheetBody(sheet: Sheet) {
         is Sheet.Info -> InfoSheet(sheet.kind)
         Sheet.Feedback -> FeedbackSheet()
         Sheet.Server -> ServerSheet()
+        Sheet.UseComputer -> UseComputerSheet()
         is Sheet.VaultAdd -> VaultAddSheet(sheet.cat)
+        is Sheet.VaultDetail -> VaultDetailSheet(sheet.itemId)
         is Sheet.MemoryAdd -> MemoryAddSheet(sheet.botId)
         is Sheet.RoutineAdd -> RoutineAddSheet(sheet.botId)
         is Sheet.RenameBot -> RenameBotSheet(sheet.botId)
@@ -713,6 +717,69 @@ private fun ServerSheet() {
     }
 }
 
+// ---------- 使用电脑 ----------
+
+@Composable
+private fun UseComputerSheet() {
+    SheetFrame("使用电脑") {
+        GuideItem(
+            FIcon.Eye, "接管控制",
+            "一开始仅观看。点按底部栏的“接管控制”即可点击和输入。Bot 请求帮助时，一开始就由你控制。",
+        )
+        GuideItem(FIcon.ArrowsUpDown, "滚动", "用两根手指拖动。")
+        GuideItem(FIcon.Cursor, "点击与拖动", "点按即可在点按处单击。单指拖动。")
+        GuideItem(FIcon.ListDots, "右键点击", "双指点按，或长按。")
+        GuideItem(FIcon.ZoomIn, "放大", "双指捏合缩放。放大后，双指为平移而非滚动。")
+
+        GuideSection("输入与剪贴板")
+        GuideItem(FIcon.Keyboard, "输入", "点按底部栏的键盘按钮。")
+        GuideItem(
+            FIcon.Clipboard, "复制与粘贴",
+            "点按底部栏的剪贴板按钮，即可“复制到手机”和“从手机粘贴”。",
+        )
+
+        GuideSection("需要指针时")
+        GuideItem(
+            FIcon.Trackpad, "触控板模式",
+            "从 … 菜单中开启。手指移动指针，轻点即可在指针处点按，连按两下并按住可拖移。指针偏移时可重新居中。",
+        )
+
+        GuideSection("交还控制权")
+        GuideItem(FIcon.Undo, "我完成了", "Bot 等待时，点按“我完成了”。返回后 Bot 会继续等待。")
+    }
+}
+
+@Composable
+private fun GuideSection(label: String) {
+    Text(
+        label, fontSize = 11.5.sp, color = Flux.text4,
+        modifier = Modifier.padding(top = 18.dp, bottom = 2.dp),
+    )
+}
+
+@Composable
+private fun GuideItem(icon: FIcon, title: String, text: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(
+            Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(Flux.panel2),
+            contentAlignment = Alignment.Center,
+        ) {
+            FIcon(icon, size = 18.dp, color = Flux.text2)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp, color = Flux.text)
+            Text(
+                text, fontSize = 11.5.sp, color = Flux.text3,
+                lineHeight = 17.sp, modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
+}
+
 // ---------- 保管库 ----------
 
 @Composable
@@ -721,9 +788,15 @@ private fun VaultAddSheet(initialCat: String) {
     val ui = LocalUi.current
     var tab by remember { mutableStateOf(if (initialCat == "all") "login" else initialCat) }
     val catIndex = listOf("login", "payment", "contact").indexOf(tab).coerceAtLeast(0)
-    var name by remember(tab) { mutableStateOf("") }
-    var f1 by remember(tab) { mutableStateOf("") }
-    var f2 by remember(tab) { mutableStateOf("") }
+    var name by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var card by remember { mutableStateOf("") }
+    var expiry by remember { mutableStateOf("") }
+    var holder by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
 
     SheetFrame("添加到保管库") {
         SegTabs(
@@ -737,52 +810,201 @@ private fun VaultAddSheet(initialCat: String) {
         when (tab) {
             "login" -> {
                 FieldLabel("网址（选填）")
-                FluxInput(f1, { f1 = it }, placeholder = "github.com")
+                FluxInput(url, { url = it }, placeholder = "github.com")
                 FieldLabel("用户名")
-                FluxInput(f2, { f2 = it }, placeholder = "qiuli55")
+                FluxInput(username, { username = it }, placeholder = "qiuli55")
+                FieldLabel("密码")
+                FluxInput(password, { password = it }, placeholder = "••••••••", password = true)
             }
             "payment" -> {
                 FieldLabel("卡号")
-                FluxInput(f1, { f1 = it }, placeholder = "4242 4242 4242 4242", keyboardType = KeyboardType.Number)
+                FluxInput(
+                    card, { card = it },
+                    placeholder = "4242 4242 4242 4242",
+                    keyboardType = KeyboardType.Number,
+                )
                 FieldLabel("有效期")
-                FluxInput(f2, { f2 = it }, placeholder = "12/28")
+                FluxInput(expiry, { expiry = it }, placeholder = "12/28")
+                FieldLabel("持卡人")
+                FluxInput(holder, { holder = it }, placeholder = "LI QIU")
+                SheetHint("只保存后四位、有效期与持卡人，完整卡号和安全码不会被保存。")
             }
             else -> {
                 FieldLabel("电话")
-                FluxInput(f1, { f1 = it }, placeholder = "138 0000 0000", keyboardType = KeyboardType.Phone)
+                FluxInput(phone, { phone = it }, placeholder = "138 0000 0000", keyboardType = KeyboardType.Phone)
                 FieldLabel("邮箱（选填）")
-                FluxInput(f2, { f2 = it }, placeholder = "you@example.com", keyboardType = KeyboardType.Email)
+                FluxInput(email, { email = it }, placeholder = "you@example.com", keyboardType = KeyboardType.Email)
             }
         }
-        SheetHint("保存之后，Bot 每次要用都会先向你确认。")
+        SheetHint("用系统密钥库加密后存在本机，Bot 只在任务中按需读取。")
         Spacer(Modifier.height(16.dp))
         PrimaryButton("保存到保管库", enabled = name.isNotBlank()) {
             if (name.isBlank()) {
                 ui.showToast("先给它起个名字")
                 return@PrimaryButton
             }
+            val last4 = card.filter { it.isDigit() }.takeLast(4)
             val sub = when (tab) {
-                "login" -> listOfNotNull(
-                    f1.ifBlank { "已保存登录信息" },
-                    f2.takeIf { it.isNotBlank() }?.let { " · $it" },
-                ).joinToString("")
-                "payment" -> {
-                    val last4 = f1.filter { it.isDigit() }.takeLast(4).ifBlank { "0000" }
-                    "•••• $last4" + (if (f2.isNotBlank()) " · 有效期 $f2" else "")
-                }
+                "login" -> url.trim()
+                    .removePrefix("https://").removePrefix("http://")
+                    .substringBefore("/")
+                    .ifBlank { "已保存登录信息" }
+                "payment" -> "•••• $last4" + (if (expiry.isNotBlank()) " · 有效期 ${expiry.trim()}" else "")
                 else -> {
-                    val phone = if (f1.length >= 7) {
-                        f1.take(3) + "****" + f1.takeLast(4)
-                    } else {
-                        "已保存联系信息"
+                    val p = phone.filter { it.isDigit() }
+                    when {
+                        p.length >= 7 -> p.take(3) + "****" + p.takeLast(4)
+                        email.isNotBlank() -> email.trim()
+                        else -> "已保存联系信息"
                     }
-                    phone + (if (f2.isNotBlank()) " · $f2" else "")
                 }
             }
-            store.addVault(tab, name.trim(), sub)
+            val secret = when (tab) {
+                "login" -> VaultSecrets(
+                    url = url.trim(),
+                    username = username.trim(),
+                    password = password,
+                )
+                "payment" -> VaultSecrets(
+                    last4 = last4,
+                    expiry = expiry.trim(),
+                    holder = holder.trim(),
+                )
+                else -> VaultSecrets(phone = phone.trim(), email = email.trim())
+            }
+            store.addVault(tab, name.trim(), sub, secret)
             ui.closeSheet()
             ui.showToast("已保存到保管库")
         }
+    }
+}
+
+@Composable
+private fun VaultDetailSheet(itemId: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val clipboard = LocalClipboardManager.current
+    val item = store.current().vault.firstOrNull { it.id == itemId } ?: return
+    val secret = store.vaultSecret(itemId)
+    var reveal by remember { mutableStateOf(false) }
+    val (icon, kind) = when (item.cat) {
+        "payment" -> FIcon.Wallet to "支付"
+        "contact" -> FIcon.Contact to "联系信息"
+        else -> FIcon.Key to "登录信息"
+    }
+
+    fun copy(value: String, label: String) {
+        clipboard.setText(AnnotatedString(value))
+        ui.haptic(6)
+        ui.showToast("已复制$label")
+    }
+
+    SheetFrame("保管库") {
+        Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(Flux.panel2),
+                contentAlignment = Alignment.Center,
+            ) {
+                FIcon(icon, size = 20.dp, color = Flux.accent2)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(item.title, fontSize = 16.sp, fontWeight = FontWeight(560), color = Flux.text)
+                Text(kind, fontSize = 11.5.sp, color = Flux.text3, modifier = Modifier.padding(top = 3.dp))
+            }
+        }
+
+        if (secret == null) {
+            SheetHint("这条记录来自旧版本，只有脱敏摘要；重新添加一次即可完整保存。", top = 0)
+        } else {
+            when (item.cat) {
+                "payment" -> {
+                    DetailRow("卡号", "•••• •••• •••• ${secret.last4.ifBlank { "••••" }}")
+                    DetailRow("有效期", secret.expiry.ifBlank { "未保存" })
+                    DetailRow("持卡人", secret.holder.ifBlank { "未保存" })
+                    SheetHint("完整卡号和安全码从未离开你的输入，也不会被保存。")
+                }
+                "contact" -> {
+                    DetailRow("电话", secret.phone.ifBlank { "未保存" }) {
+                        CopyChip { copy(secret.phone, "电话") }
+                    }
+                    DetailRow("邮箱", secret.email.ifBlank { "未保存" }) {
+                        CopyChip { copy(secret.email, "邮箱") }
+                    }
+                    SheetHint("Bot 可以读取这些信息，以便替你填写表格。")
+                }
+                else -> {
+                    if (secret.url.isNotBlank()) DetailRow("网址", secret.url)
+                    DetailRow("用户名", secret.username.ifBlank { "未保存" }) {
+                        CopyChip { copy(secret.username, "用户名") }
+                    }
+                    DetailRow(
+                        "密码",
+                        if (secret.password.isBlank()) {
+                            "未保存"
+                        } else if (reveal) {
+                            secret.password
+                        } else {
+                            "•".repeat(secret.password.length.coerceIn(6, 18))
+                        },
+                    ) {
+                        if (secret.password.isNotBlank()) {
+                            CircleIcon(if (reveal) FIcon.Eye else FIcon.Lock) { reveal = !reveal }
+                            Spacer(Modifier.width(8.dp))
+                            CopyChip { copy(secret.password, "密码") }
+                        }
+                    }
+                    SheetHint("Bot 可以读取这条登录信息，以便替你填写。")
+                }
+            }
+        }
+
+        Spacer(Modifier.height(18.dp))
+        DangerButton("从保管库删除") {
+            store.deleteVault(itemId)
+            ui.closeSheet()
+            ui.showToast("已从保管库删除")
+        }
+    }
+}
+
+@Composable
+private fun DetailRow(label: String, value: String, trailing: (@Composable () -> Unit)? = null) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, fontSize = 11.5.sp, color = Flux.text4)
+            Text(
+                value, fontSize = 14.sp, color = Flux.text,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
+        trailing?.invoke()
+    }
+    Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
+}
+
+@Composable
+private fun CircleIcon(icon: FIcon, onClick: () -> Unit) {
+    Box(
+        Modifier.size(30.dp).clip(CircleShape).background(Flux.panel3).clickable { onClick() },
+        contentAlignment = Alignment.Center,
+    ) {
+        FIcon(icon, size = 14.dp, color = Flux.text2)
+    }
+}
+
+@Composable
+private fun CopyChip(onClick: () -> Unit) {
+    Box(
+        Modifier.height(30.dp).clip(RoundedCornerShape(15.dp)).background(Flux.panel3)
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("复制", fontSize = 12.sp, color = Flux.text2)
     }
 }
 
@@ -1127,6 +1349,9 @@ private fun VaultMenuSheet(itemId: String) {
     val store = LocalStore.current
     val ui = LocalUi.current
     SheetFrame("保管库") {
+        MenuItem("查看详情") {
+            ui.sheet = Sheet.VaultDetail(itemId)
+        }
         MenuItem("从保管库删除", danger = true) {
             store.deleteVault(itemId)
             ui.closeSheet()

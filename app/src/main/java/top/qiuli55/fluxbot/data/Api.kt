@@ -146,13 +146,9 @@ class Api(context: Context) {
     /** 远端 Bot 的默认模型（定时开工也用它）；model 留空 = 清掉覆盖。 */
     suspend fun updateBotModel(botId: String, model: String, keyId: String?) =
         withContext(Dispatchers.IO) {
-            val body = JSONObject()
-            if (model.isBlank()) {
-                body.put("model", JSONObject.NULL).put("key_id", JSONObject.NULL)
-            } else {
-                body.put("model", model).put("key_id", keyId ?: JSONObject.NULL)
-            }
-            request("PATCH", "/api/v1/bots/$botId", body)
+            val body = JSONObject().put("model", model)
+            if (!keyId.isNullOrBlank() && model.isNotBlank()) body.put("key_id", keyId)
+            request("POST", "/api/v1/bots/$botId/model", body)
         }
 
     /** 发一条聊天消息，返回模型的回复文本。 */

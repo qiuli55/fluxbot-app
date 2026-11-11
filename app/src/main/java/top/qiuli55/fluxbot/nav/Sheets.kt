@@ -556,7 +556,6 @@ private fun ComputerSheet(botId: String) {
 private fun ModelSheet(botId: String) {
     val store = LocalStore.current
     val ui = LocalUi.current
-    val scope = rememberCoroutineScope()
     val bot = store.bot(botId) ?: return
     var catalog by remember { mutableStateOf<ModelCatalog?>(null) }
     var loading by remember { mutableStateOf(true) }
@@ -575,20 +574,26 @@ private fun ModelSheet(botId: String) {
         val oldKey = bot.modelKeyId
         store.setModel(botId, model, keyId)
         ui.haptic(8)
-        scope.launch {
+        // 用页面级作用域：底部弹层被关掉也不会中断请求，更不会误判成失败
+        ui.scope.launch {
             val taskId = store.bot(botId)?.taskId.orEmpty()
-            val ok = runCatching {
-                if (bot.remote) store.api.updateBotModel(botId, model, keyId.takeIf { it.isNotBlank() })
-                if (taskId.isNotEmpty()) {
+            val errors = mutableListOf<String>()
+            if (bot.remote) {
+                runCatching {
+                    store.api.updateBotModel(botId, model, keyId.takeIf { it.isNotBlank() })
+                }.onFailure { errors += "Bot：${it.message ?: "未知错误"}" }
+            }
+            if (taskId.isNotEmpty()) {
+                runCatching {
                     store.api.setTaskModel(taskId, model, keyId.takeIf { it.isNotBlank() })
-                }
-            }.isSuccess
-            if (ok) {
+                }.onFailure { errors += "当前对话：${it.message ?: "未知错误"}" }
+            }
+            if (errors.isEmpty()) {
                 if (ui.sheet is Sheet.Model) ui.closeSheet()
                 ui.showToast("已切换到 $label")
             } else {
                 store.setModel(botId, oldModel, oldKey)
-                ui.showToast("云端没有接受这个模型，已还原")
+                ui.showToast("切换失败：" + errors.joinToString("；"))
             }
         }
     }

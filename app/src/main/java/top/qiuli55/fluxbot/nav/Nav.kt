@@ -53,6 +53,7 @@ import top.qiuli55.fluxbot.screens.ChatScreen
 import top.qiuli55.fluxbot.screens.CreateScreen
 import top.qiuli55.fluxbot.screens.DesktopScreen
 import top.qiuli55.fluxbot.screens.HomeScreen
+import top.qiuli55.fluxbot.screens.LibraryScreen
 import top.qiuli55.fluxbot.screens.MemoryScreen
 import top.qiuli55.fluxbot.screens.SettingsScreen
 import top.qiuli55.fluxbot.screens.VaultScreen
@@ -65,6 +66,7 @@ sealed interface Route {
     data class Chat(val botId: String) : Route
     data class BotDetail(val botId: String) : Route
     data class BotDesktop(val botId: String) : Route
+    data class Library(val botId: String) : Route
     data object Settings : Route
     data object Account : Route
     data object Vault : Route
@@ -203,6 +205,7 @@ fun FluxApp(store: Store) {
                         is Route.Chat -> ChatScreen(route.botId)
                         is Route.BotDetail -> BotScreen(route.botId)
                         is Route.BotDesktop -> DesktopScreen(route.botId)
+                        is Route.Library -> LibraryScreen(route.botId)
                         Route.Settings -> SettingsScreen()
                         Route.Account -> AccountScreen()
                         Route.Vault -> VaultScreen()

@@ -57,10 +57,10 @@ private val CATS = listOf(
 )
 
 private fun emptyCopy(cat: String): String = when (cat) {
-    "login" -> "还没有保存登录信息。\nBot 需要登录某个网站时，会先问你，再从这里读取。"
-    "payment" -> "还没有保存支付信息。\n卡号只保留后四位，安全码永远不会保存。"
-    "contact" -> "还没有保存联系信息。\n让 Bot 替你填表时，它会用这里的电话和邮箱。"
-    else -> "保管库还是空的。\n把常用网站的登录信息、支付卡和联系信息放进来，Bot 执行任务时就不用每次问你。"
+    "login" -> "还没有保存登录信息。"
+    "payment" -> "还没有保存支付信息。"
+    "contact" -> "还没有保存联系信息。"
+    else -> "还没有保存任何内容。"
 }
 
 private fun iconOf(cat: String): FIcon = when (cat) {
@@ -157,10 +157,17 @@ fun VaultScreen() {
                     VaultEmpty(cat)
                 } else {
                     items.forEach { v ->
-                        VaultRow(v) {
-                            ui.haptic(10)
-                            ui.sheet = Sheet.VaultMenu(v.id)
-                        }
+                        VaultRow(
+                            v,
+                            onClick = {
+                                ui.haptic(10)
+                                ui.sheet = Sheet.VaultDetail(v.id)
+                            },
+                            onLongClick = {
+                                ui.haptic(10)
+                                ui.sheet = Sheet.VaultMenu(v.id)
+                            },
+                        )
                     }
                 }
             }
@@ -193,7 +200,7 @@ private fun VaultEmpty(cat: String) {
         Text(emptyCopy(cat), fontSize = 14.sp, color = Flux.text2, lineHeight = 21.7.sp)
     }
     Text(
-        "保存之后，Bot 每次要用都会先向你确认。",
+        "Flux Bot 永远看不到已保存卡片的卡号或安全码。它可以看见登录信息和联系信息，以便替你填写。",
         fontSize = 12.sp,
         color = Flux.text3,
         lineHeight = 19.2.sp,
@@ -203,7 +210,7 @@ private fun VaultEmpty(cat: String) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun VaultRow(item: VaultItem, onLongClick: () -> Unit) {
+private fun VaultRow(item: VaultItem, onClick: () -> Unit, onLongClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -214,7 +221,7 @@ private fun VaultRow(item: VaultItem, onLongClick: () -> Unit) {
             .combinedClickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-                onClick = {},
+                onClick = onClick,
                 onLongClick = onLongClick,
             )
             .padding(horizontal = 15.dp, vertical = 14.dp),

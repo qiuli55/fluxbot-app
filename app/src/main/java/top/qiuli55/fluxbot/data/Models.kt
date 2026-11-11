@@ -37,6 +37,17 @@ data class Routine(
 
 data class VaultItem(val id: String, val cat: String, val title: String, val sub: String)
 
+/** 资料库里的一条网页记录：Bot 或群聊在任务中看过、并留在本站的东西。 */
+data class LibraryEntry(
+    val id: String,
+    val title: String,
+    val host: String,
+    val group: String = "本周",
+    val mark: String = "",
+    val bg: Long = 0xFF23282D,
+    val fg: Long = 0xFFE6E9EC,
+)
+
 data class Bot(
     val id: String,
     val name: String,
@@ -58,6 +69,7 @@ data class Bot(
     val members: List<String> = emptyList(),
     val taskId: String = "",
     val remote: Boolean = false,
+    val library: List<LibraryEntry> = emptyList(),
 )
 
 data class Settings(
@@ -144,6 +156,16 @@ fun VaultItem.toJson() = JSONObject().put("id", id).put("cat", cat).put("title",
 fun vaultFromJson(o: JSONObject) =
     VaultItem(o.getString("id"), o.getString("cat"), o.getString("title"), o.getString("sub"))
 
+fun LibraryEntry.toJson() = JSONObject()
+    .put("id", id).put("title", title).put("host", host).put("group", group)
+    .put("mark", mark).put("bg", bg).put("fg", fg)
+
+fun libraryFromJson(o: JSONObject) = LibraryEntry(
+    id = o.getString("id"), title = o.optString("title"), host = o.optString("host"),
+    group = o.optString("group", "本周"), mark = o.optString("mark"),
+    bg = o.optLong("bg", 0xFF23282D), fg = o.optLong("fg", 0xFFE6E9EC),
+)
+
 fun Bot.toJson() = JSONObject()
     .put("id", id).put("name", name).put("seed", seed).put("shape", shape).put("palette", palette)
     .put("preview", preview).put("time", time).put("unread", unread)
@@ -157,6 +179,7 @@ fun Bot.toJson() = JSONObject()
     .put("members", JSONArray().apply { addAllStrings(members) })
     .put("taskId", taskId)
     .put("remote", remote)
+    .put("library", JSONArray().apply { library.forEach { put(it.toJson()) } })
 
 fun botFromJson(o: JSONObject) = Bot(
     id = o.getString("id"), name = o.getString("name"), seed = o.getString("seed"),
@@ -175,6 +198,9 @@ fun botFromJson(o: JSONObject) = Bot(
     members = o.optJSONArray("members")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
     taskId = o.optString("taskId"),
     remote = o.optBoolean("remote", false),
+    library = o.optJSONArray("library")
+        ?.let { a -> (0 until a.length()).map { libraryFromJson(a.getJSONObject(it)) } }
+        ?: emptyList(),
 )
 
 fun Settings.toJson() = JSONObject()

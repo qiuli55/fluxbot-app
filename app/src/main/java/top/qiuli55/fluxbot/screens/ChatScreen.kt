@@ -144,7 +144,9 @@ fun ChatScreen(botId: String) {
                 try {
                     var taskId = store.bot(botId)?.taskId.orEmpty()
                     if (taskId.isEmpty()) {
-                        taskId = store.api.createTask(text, bot.name, bot.shape, bot.palette)
+                        taskId = store.api.createTask(
+                            text, bot.name, bot.shape, bot.palette, bot.model, bot.modelKeyId,
+                        )
                         store.setTaskId(botId, taskId)
                     }
                     val reply = store.api.sendMessage(taskId, text)
@@ -176,7 +178,10 @@ fun ChatScreen(botId: String) {
                         try {
                             var taskId = store.bot(member.id)?.taskId.orEmpty()
                             if (taskId.isEmpty()) {
-                                taskId = store.api.createTask(text, member.name, member.shape, member.palette)
+                                taskId = store.api.createTask(
+                                    text, member.name, member.shape, member.palette,
+                                    member.model, member.modelKeyId,
+                                )
                                 store.setTaskId(member.id, taskId)
                             }
                             val reply = store.api.sendMessage(taskId, text)

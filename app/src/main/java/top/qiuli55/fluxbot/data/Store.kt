@@ -230,6 +230,10 @@ class Store(context: Context) {
 
     fun setComputer(botId: String, name: String) = updateBot(botId) { it.copy(computer = name) }
 
+    /** 记住这个 Bot 的路由模型（空 model = 跟随平台默认）。 */
+    fun setModel(botId: String, model: String, keyId: String = "") =
+        updateBot(botId) { it.copy(model = model, modelKeyId = keyId) }
+
     fun removeMessage(botId: String, msgId: String) = updateBot(botId) {
         it.copy(messages = it.messages.filterNot { m -> m.id == msgId })
     }

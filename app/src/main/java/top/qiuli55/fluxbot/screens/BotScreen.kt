@@ -215,6 +215,14 @@ private fun SettingsPane(bot: Bot) {
     val clipboard = LocalClipboardManager.current
 
     FluxCard {
+        if (!bot.group) {
+            ItemRow(
+                title = "模型",
+                sub = if (bot.model.isBlank()) "跟随云端默认" else bot.model,
+                trailing = { RowChevron() },
+                onClick = { ui.sheet = Sheet.Model(bot.id) },
+            )
+        }
         ItemRow(
             title = "Bot 电脑",
             sub = "任务在这台设备上执行",

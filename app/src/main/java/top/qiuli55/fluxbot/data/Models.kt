@@ -201,7 +201,7 @@ fun botFromJson(o: JSONObject) = Bot(
     autoMemory = o.optBoolean("autoMemory", true),
     group = o.optBoolean("group", false),
     members = o.optJSONArray("members")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
-    taskId = o.optString("taskId"),
+    taskId = o.optString("taskId").takeUnless { it == "null" }.orEmpty(),
     remote = o.optBoolean("remote", false),
     library = o.optJSONArray("library")
         ?.let { a -> (0 until a.length()).map { libraryFromJson(a.getJSONObject(it)) } }

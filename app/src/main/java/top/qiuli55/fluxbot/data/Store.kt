@@ -147,7 +147,7 @@ class Store(context: Context) {
                         computer = "云端 · flux-bot",
                         messages = emptyList(), memories = emptyList(), routines = emptyList(),
                         permissions = emptyMap(), autoMemory = true,
-                        taskId = r.taskId, remote = true,
+                        taskId = r.taskId.takeUnless { it == "null" }.orEmpty(), remote = true,
                     )
                 } else {
                     bots.map {
@@ -156,7 +156,9 @@ class Store(context: Context) {
                             shape = AvatarMap.toAppShape(r.shape),
                             palette = AvatarMap.toAppPalette(r.palette),
                             preview = r.description.ifEmpty { it.preview },
-                            taskId = it.taskId.ifEmpty { r.taskId },
+                            taskId = listOf(it.taskId, r.taskId)
+                                .firstOrNull { id -> id.isNotEmpty() && id != "null" }
+                                .orEmpty(),
                             remote = true,
                         ) else it
                     }

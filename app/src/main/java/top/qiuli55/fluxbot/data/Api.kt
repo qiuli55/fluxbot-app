@@ -1,14 +1,19 @@
 package top.qiuli55.fluxbot.data
 
 import android.content.Context
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.net.ConnectException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 
 /** 后端返回的一条 Bot（已换算成 App 的形体 / 配色 key）。 */
 data class RemoteBot(
@@ -63,7 +68,11 @@ data class ConnectorPoll(
     val message: String,
 )
 
-class ApiException(message: String) : Exception(message)
+class ApiException(message: String, val status: Int = 0) : Exception(message)
+
+/** 与 optString 不同：JSONObject.NULL / 缺失字段都返回空串，而不是字面量 "null"。 */
+internal fun JSONObject.optStringOrEmpty(key: String): String =
+    if (isNull(key)) "" else optString(key)
 
 /**
  * flux-bot 后端的最小客户端：只依赖 HttpURLConnection + org.json，不引入新依赖。
@@ -157,12 +166,12 @@ class Api(context: Context) {
         val items = data.optJSONArray("key_models") ?: JSONArray()
         val options = (0 until items.length()).mapNotNull {
             val o = items.getJSONObject(it)
-            val model = o.optString("model").trim()
-            val keyId = o.optString("key_id").trim()
+            val model = o.optStringOrEmpty("model").trim()
+            val keyId = o.optStringOrEmpty("key_id").trim()
             if (model.isEmpty() || keyId.isEmpty()) null
-            else RemoteModel(model, o.optString("key_name"), keyId)
+            else RemoteModel(model, o.optStringOrEmpty("key_name"), keyId)
         }
-        ModelCatalog(data.optString("model"), options)
+        ModelCatalog(data.optStringOrEmpty("model"), options)
     }
 
     /** 切换已有对话（任务）的模型；model 留空 = 回到平台默认。 */
@@ -240,35 +249,80 @@ class Api(context: Context) {
      * 公网入口对空闲连接约 20 秒就会断开（返回 502），而模型出完整回复要 30 秒以上，
      * 所以不能干等 POST：POST 只负责触发，回复改从这里轮询增量事件取回。
      */
-    suspend fun waitForReply(taskId: String, afterSeq: Int, timeoutMs: Long = 180_000): String {
+    suspend fun waitForReply(
+        taskId: String,
+        afterSeq: Int,
+        timeoutMs: Long = 180_000,
+        send: Deferred<Throwable?>? = null,
+    ): String {
         var seq = afterSeq
         var failures = 0
+        var emptyPolls = 0
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             delay(700)
-            val events = runCatching { pollEvents(taskId, seq) }
-                .onSuccess { failures = 0 }
-                .onFailure {
-                    failures += 1
-                    if (failures >= 3) throw it
+            if (send != null && send.isCompleted) {
+                val error = send.await()
+                if (error != null && isDefiniteSendFailure(error)) {
+                    throw ApiException(
+                        "发送失败：${error.message ?: "未知错误"}",
+                        (error as? ApiException)?.status ?: 0,
+                    )
                 }
-                .getOrNull() ?: continue
+            }
+            val events = try {
+                pollEvents(taskId, seq)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failures += 1
+                if (failures >= 3) throw e
+                continue
+            }
+            failures = 0
+            if (events.isEmpty()) {
+                emptyPolls += 1
+                // 服务端重启后 seq 会从 0 重新开始；此时 after_seq 太大永远取不到事件。
+                if (emptyPolls >= 10) {
+                    emptyPolls = 0
+                    val maxSeq = try {
+                        pollEvents(taskId, 0).maxOfOrNull { it.seq } ?: 0
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        seq
+                    }
+                    if (maxSeq < seq) {
+                        seq = 0
+                        continue
+                    }
+                }
+                continue
+            }
+            emptyPolls = 0
             for (event in events) {
                 seq = maxOf(seq, event.seq)
                 when (event.type) {
                     "assistant_message" -> {
                         val text = event.data.optJSONObject("message")
-                            ?.optString("content").orEmpty()
+                            ?.optStringOrEmpty("content").orEmpty()
                         if (text.isNotBlank()) return text
                     }
                     "assistant_error" -> {
-                        val reason = event.data.optString("error").ifBlank { "模型返回异常" }
+                        val reason = event.data.optStringOrEmpty("error").ifBlank { "模型返回异常" }
                         throw ApiException(reason)
                     }
                 }
             }
         }
         throw ApiException("等模型回复超时")
+    }
+
+    /** 请求确定没有到达服务端 / 被明确拒绝时立即失败；其余（超时、5xx）继续等回复。 */
+    private fun isDefiniteSendFailure(error: Throwable): Boolean = when (error) {
+        is ApiException -> error.status in 400..499
+        is UnknownHostException, is ConnectException, is SSLException -> true
+        else -> false
     }
 
     /** 发消息之前记下当前事件序号，之后只看比它新的回复事件。 */
@@ -336,12 +390,12 @@ class Api(context: Context) {
                 return JSONObject().put("success", true)
             }
             val root = runCatching { JSONObject(text) }.getOrElse {
-                throw ApiException("服务器返回异常（HTTP $code）")
+                throw ApiException("服务器返回异常（HTTP $code）", code)
             }
             val success = root.optBoolean("success", code in 200..299)
             if (code !in 200..299 || !success) {
-                val msg = root.optString("message").ifEmpty { "请求失败（HTTP $code）" }
-                throw ApiException(msg)
+                val msg = root.optStringOrEmpty("message").ifEmpty { "请求失败（HTTP $code）" }
+                throw ApiException(msg, code)
             }
             return root
         } finally {
@@ -352,25 +406,25 @@ class Api(context: Context) {
     private fun parseConnector(o: JSONObject): RemoteConnector {
         val scopes = o.optJSONArray("scopes") ?: JSONArray()
         return RemoteConnector(
-            id = o.optString("id"),
-            name = o.optString("name"),
-            description = o.optString("description"),
+            id = o.optStringOrEmpty("id"),
+            name = o.optStringOrEmpty("name"),
+            description = o.optStringOrEmpty("description"),
             connected = o.optBoolean("connected"),
-            account = o.optString("account"),
-            displayName = o.optString("display_name"),
-            avatarUrl = o.optString("avatar_url"),
+            account = o.optStringOrEmpty("account"),
+            displayName = o.optStringOrEmpty("display_name"),
+            avatarUrl = o.optStringOrEmpty("avatar_url"),
             scopes = (0 until scopes.length()).map { scopes.optString(it) },
-            connectedAt = o.optString("connected_at"),
+            connectedAt = o.optStringOrEmpty("connected_at"),
         )
     }
 
     private fun parseBot(o: JSONObject) = RemoteBot(
         id = o.getString("id"),
-        name = o.optString("name"),
-        shape = AvatarMap.toAppShape(o.optString("avatar_shape")),
-        palette = AvatarMap.toAppPalette(o.optString("avatar_color")),
-        description = o.optString("description"),
-        taskId = o.optString("last_task_id"),
+        name = o.optStringOrEmpty("name"),
+        shape = AvatarMap.toAppShape(o.optStringOrEmpty("avatar_shape")),
+        palette = AvatarMap.toAppPalette(o.optStringOrEmpty("avatar_color")),
+        description = o.optStringOrEmpty("description"),
+        taskId = o.optStringOrEmpty("last_task_id").takeUnless { it == "null" }.orEmpty(),
     )
 
     companion object {

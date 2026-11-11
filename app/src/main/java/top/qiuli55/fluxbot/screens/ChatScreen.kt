@@ -60,6 +60,8 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Bot
@@ -142,7 +144,7 @@ fun ChatScreen(botId: String) {
             ui.scope.launch {
                 typing = true
                 try {
-                    var taskId = store.bot(botId)?.taskId.orEmpty()
+                    var taskId = store.bot(botId)?.taskId?.takeUnless { it == "null" }.orEmpty()
                     if (taskId.isEmpty()) {
                         taskId = store.api.createTask(
                             text, bot.name, bot.shape, bot.palette, bot.model, bot.modelKeyId,
@@ -151,11 +153,22 @@ fun ChatScreen(botId: String) {
                     }
                     // 触发后端回答；回复从增量事件轮询取回（公网入口 20 秒就会断开空闲连接）
                     val seq = store.api.lastSeq(taskId)
-                    ui.scope.launch { runCatching { store.api.sendMessage(taskId, text) } }
-                    val reply = store.api.waitForReply(taskId, seq)
+                    val send = ui.scope.async<Throwable?> {
+                        try {
+                            store.api.sendMessage(taskId, text)
+                            null
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            e
+                        }
+                    }
+                    val reply = store.api.waitForReply(taskId, seq, send = send)
                     typing = false
                     store.addMessage(botId, "bot", reply)
                     store.markRead(botId)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     typing = false
                     store.addMessage(botId, "bot", "后端没有响应：${e.message ?: "未知错误"}")
@@ -179,7 +192,7 @@ fun ChatScreen(botId: String) {
                 members.forEach { member ->
                     launch {
                         try {
-                            var taskId = store.bot(member.id)?.taskId.orEmpty()
+                            var taskId = store.bot(member.id)?.taskId?.takeUnless { it == "null" }.orEmpty()
                             if (taskId.isEmpty()) {
                                 taskId = store.api.createTask(
                                     text, member.name, member.shape, member.palette,
@@ -188,10 +201,21 @@ fun ChatScreen(botId: String) {
                                 store.setTaskId(member.id, taskId)
                             }
                             val seq = store.api.lastSeq(taskId)
-                            ui.scope.launch { runCatching { store.api.sendMessage(taskId, text) } }
-                            val reply = store.api.waitForReply(taskId, seq)
+                            val send = ui.scope.async<Throwable?> {
+                                try {
+                                    store.api.sendMessage(taskId, text)
+                                    null
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Throwable) {
+                                    e
+                                }
+                            }
+                            val reply = store.api.waitForReply(taskId, seq, send = send)
                             store.addMessage(botId, "bot", reply, sender = member.name)
                             store.markRead(botId)
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (e: Exception) {
                             store.addMessage(
                                 botId, "bot", "没有响应：${e.message ?: "未知错误"}", sender = member.name,

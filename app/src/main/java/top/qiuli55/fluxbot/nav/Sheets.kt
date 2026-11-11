@@ -5,6 +5,8 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -54,6 +56,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -64,7 +67,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Api
 import top.qiuli55.fluxbot.data.Bot
+import top.qiuli55.fluxbot.data.DeviceLogin
 import top.qiuli55.fluxbot.data.ModelCatalog
+import top.qiuli55.fluxbot.data.RemoteConnector
 import top.qiuli55.fluxbot.data.VaultSecrets
 import top.qiuli55.fluxbot.ip.FloAvatarStill
 import top.qiuli55.fluxbot.screens.BotAvatar
@@ -86,6 +91,7 @@ sealed interface Sheet {
     data object AddAccount : Sheet
     data object Usage : Sheet
     data object Subscription : Sheet
+    data class Connector(val id: String) : Sheet
     data object Devices : Sheet
     data class Computer(val botId: String) : Sheet
     data class Permissions(val botId: String) : Sheet
@@ -219,6 +225,7 @@ private fun SheetBody(sheet: Sheet) {
         Sheet.AddAccount -> AddAccountSheet()
         Sheet.Usage -> UsageSheet()
         Sheet.Subscription -> SubscriptionSheet()
+        is Sheet.Connector -> ConnectorSheet(sheet.id)
         Sheet.Devices -> DevicesSheet()
         is Sheet.Computer -> ComputerSheet(sheet.botId)
         is Sheet.Permissions -> PermissionsSheet(sheet.botId)
@@ -395,6 +402,224 @@ private fun AddAccountSheet() {
                 ui.closeSheet()
                 ui.reset(Route.Home)
                 ui.showToast("已添加并切换到 $v")
+            }
+        }
+    }
+}
+
+// ---------- 外部连接器 ----------
+
+/**
+ * 连接器弹层：账户页「连接器」分组的统一入口，以后新增的外部连接器都从这里进。
+ * 目前只有 GitHub：未连接 → 设备码授权；等待中 → 显示 8 位码并自动轮询；
+ * 已连接 → 展示身份与授权范围，可断开。
+ */
+@Composable
+private fun ConnectorSheet(id: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val isGithub = id == "github"
+
+    var connector by remember { mutableStateOf<RemoteConnector?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf("") }
+    var login by remember { mutableStateOf<DeviceLogin?>(null) }
+    var notice by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+
+    LaunchedEffect(id) {
+        loading = true
+        runCatching { store.api.listConnectors() }
+            .onSuccess { list ->
+                connector = list.firstOrNull { it.id == id }
+                if (connector == null) error = "服务端没有名为 $id 的连接器"
+            }
+            .onFailure { error = it.message ?: "状态读取失败" }
+        loading = false
+    }
+
+    // 设备码轮询：按服务端下发的 interval 拉，授权成功后自动收起弹层。
+    LaunchedEffect(login?.flowId) {
+        val flow = login ?: return@LaunchedEffect
+        while (true) {
+            delay(flow.interval.coerceAtLeast(5) * 1000L)
+            val poll = runCatching { store.api.pollGithubLogin(flow.flowId) }
+                .getOrElse {
+                    notice = it.message ?: "授权状态查询失败"
+                    login = null
+                    return@LaunchedEffect
+                }
+            when (poll.status) {
+                "success" -> {
+                    poll.connector?.let { connector = it }
+                    login = null
+                    ui.haptic(10)
+                    ui.showToast("GitHub 已连接")
+                    ui.closeSheet()
+                    return@LaunchedEffect
+                }
+                "expired" -> {
+                    notice = "授权码已过期，重新连接会生成新的验证码"
+                    login = null
+                    return@LaunchedEffect
+                }
+                "failed" -> {
+                    notice = poll.message.ifBlank { "GitHub 授权失败" }
+                    login = null
+                    return@LaunchedEffect
+                }
+            }
+        }
+    }
+
+    fun start() {
+        busy = true
+        notice = ""
+        ui.scope.launch {
+            runCatching { store.api.startGithubLogin() }
+                .onSuccess {
+                    login = it
+                    ui.haptic(6)
+                }
+                .onFailure { notice = it.message ?: "发起连接失败" }
+            busy = false
+        }
+    }
+
+    fun openBrowser(flow: DeviceLogin) {
+        val url = flow.verificationUriComplete.ifBlank { flow.verificationUri }
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            ui.haptic(6)
+        }.onFailure { ui.showToast("没有可以打开浏览器的应用") }
+    }
+
+    SheetFrame("连接器") {
+        val item = connector
+        if (item == null) {
+            SheetHint(
+                if (loading) "正在读取连接状态…" else error.ifBlank { "连接状态读取失败" },
+                top = 0,
+            )
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton("重试", enabled = !loading) {
+                loading = true
+                error = ""
+                ui.scope.launch {
+                    runCatching { store.api.listConnectors() }
+                        .onSuccess { list -> connector = list.firstOrNull { it.id == id } }
+                        .onFailure { error = it.message ?: "状态读取失败" }
+                    loading = false
+                    if (connector == null && error.isBlank()) error = "服务端没有名为 $id 的连接器"
+                }
+            }
+            return@SheetFrame
+        }
+
+        Row(
+            Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            InitialsAvatar(
+                if (item.connected && item.account.isNotEmpty()) {
+                    item.account.take(2).uppercase()
+                } else {
+                    "GH"
+                },
+                44.dp,
+                accent = item.connected,
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(item.name, fontSize = 16.sp, fontWeight = FontWeight(560), color = Flux.text)
+                Text(
+                    when {
+                        item.connected -> "已连接 · @${item.account}"
+                        item.displayName.isNotBlank() -> item.displayName
+                        else -> item.description
+                    },
+                    fontSize = 11.5.sp, color = Flux.text3,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+        }
+
+        val flow = login
+        when {
+            flow != null -> {
+                SheetHint("在浏览器里打开授权页，输入下面这 8 位码即可。完成后这里会自动变绿。", top = 0)
+                Box(
+                    Modifier.fillMaxWidth().padding(top = 14.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Flux.panel2)
+                        .border(1.dp, Flux.lineSoft, RoundedCornerShape(18.dp))
+                        .padding(vertical = 20.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        flow.userCode,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight(560),
+                        letterSpacing = 4.sp,
+                        color = Flux.text,
+                    )
+                }
+                Spacer(Modifier.height(14.dp))
+                PrimaryButton("打开 GitHub 授权") { openBrowser(flow) }
+                Spacer(Modifier.height(10.dp))
+                SecondaryButton("复制验证码") {
+                    clipboard.setText(AnnotatedString(flow.userCode))
+                    ui.haptic(6)
+                    ui.showToast("验证码已复制")
+                }
+                SheetHint("正在等待你在 GitHub 上确认…授权后会按当前账户保存。")
+            }
+
+            item.connected -> {
+                DetailRow("GitHub 账号", "@${item.account}")
+                DetailRow("授权范围", item.scopes.joinToString(" ").ifBlank { "repo read:user" })
+                DetailRow("连接时间", item.connectedAt.take(10).ifBlank { "—" })
+                Spacer(Modifier.height(18.dp))
+                DangerButton("断开连接") {
+                    ui.sheet = Sheet.Confirm(
+                        title = "断开 GitHub",
+                        text = "Bot 将不能再读取这个账户的仓库、Issue、PR 与 Actions。GitHub 上的授权本身不会被撤销。",
+                        action = "断开连接",
+                        danger = true,
+                    ) {
+                        ui.scope.launch {
+                            runCatching { store.api.disconnectGithub() }
+                                .onSuccess { ui.showToast("已断开 GitHub 连接") }
+                                .onFailure { ui.showToast("断开失败：" + (it.message ?: "未知错误")) }
+                        }
+                    }
+                }
+                SheetHint("断开只删除服务端的连接记录。想彻底撤销权限，请到 GitHub → Settings → Applications 里移除。")
+            }
+
+            else -> {
+                SheetHint("连接后，Bot 可以在对话里读取你的仓库、Issue、PR 与 Actions 运行记录。", top = 0)
+                if (notice.isNotBlank()) {
+                    Text(
+                        notice,
+                        fontSize = 12.sp,
+                        color = Flux.danger,
+                        lineHeight = 18.sp,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                PrimaryButton(
+                    if (busy) "正在获取验证码…" else "连接 GitHub",
+                    enabled = isGithub && !busy,
+                ) { start() }
+                if (!isGithub) {
+                    SheetHint("这个连接器还没有开放授权。")
+                } else {
+                    SheetHint("授权按当前账户隔离：切换账户后需要各自连接一次。")
+                }
             }
         }
     }

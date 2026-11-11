@@ -1,6 +1,25 @@
 package top.qiuli55.fluxbot.data
 
 /**
+ * 一次桌面连接的入口参数，由后端 `/api/v1/desktop` 下发。
+ *
+ * 隧道地址（gateway / bridge）会随 Cloudflare 快速隧道重启变化，凭据（token /
+ * bridgeKey）属于服务端配置，都不写进 App 源码——轮换后不需要重新发版。
+ */
+data class DesktopConfig(
+    val gateway: String,
+    val bridge: String,
+    val token: String,
+    val bridgeKey: String,
+    val configUrl: String,
+) {
+    /** 服务端四件参数齐了才算可用。 */
+    val configured: Boolean
+        get() = gateway.isNotBlank() && bridge.isNotBlank() &&
+            token.isNotBlank() && bridgeKey.isNotBlank()
+}
+
+/**
  * Hermes Bot Desktop 的入口参数。
  *
  * 每个 Bot 对应一台云电脑上的一个 Hermes profile，
@@ -8,19 +27,8 @@ package top.qiuli55.fluxbot.data
  */
 object BotDesktop {
     /**
-     * 国内网络对 *.instabox.tech 有 DNS 污染，直连会解析到劫持 IP 并超时。
-     * 因此统一走 InstaBox 上的 Cloudflare 隧道（不经用户自己的服务器）。
-     */
-    const val HOST = "mirror-artwork-affects-bradford.trycloudflare.com"
-    const val TOKEN = "hk_REDACTED"
-
-    /** 宿主机上的极简桥：把 bot 的浏览器窗口拉回桌面。 */
-    const val BRIDGE = "https://therapy-robots-confidentiality-former.trycloudflare.com"
-    const val BRIDGE_KEY = "fdk_REDACTED"
-
-    /**
-     * 快速隧道每次重启域名都会变，上面的值只是兜底。
-     * 页面启动时会先读这个稳定地址拿最新入口（只取配置，画面不经过该服务器）。
+     * 稳定入口：App 启动时读这个公开 JSON 拿兜底隧道地址。
+     * 真正下发给页面时以服务端返回的 gateway / bridge 为准。
      */
     const val CONFIG_URL = "https://flux.qiuli55.top/fluxbot-mobile/desktop.json"
 

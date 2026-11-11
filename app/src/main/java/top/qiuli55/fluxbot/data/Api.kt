@@ -212,6 +212,20 @@ class Api(context: Context) {
         parseConnector(request("DELETE", "/api/v1/connectors/github", null).getJSONObject("data"))
     }
 
+    // ---------- Bot 桌面 ----------
+
+    /** 桌面入口参数：隧道地址随隧道变化，凭据由服务端注入，App 不保存。 */
+    suspend fun desktopConfig(): DesktopConfig = withContext(Dispatchers.IO) {
+        val data = request("GET", "/api/v1/desktop", null).getJSONObject("data")
+        DesktopConfig(
+            gateway = data.optString("gateway"),
+            bridge = data.optString("bridge"),
+            token = data.optString("token"),
+            bridgeKey = data.optString("bridge_key"),
+            configUrl = data.optString("config_url"),
+        )
+    }
+
     /** 远端 Bot 的默认模型（定时开工也用它）；model 留空 = 清掉覆盖。 */
     suspend fun updateBotModel(botId: String, model: String, keyId: String?) =
         withContext(Dispatchers.IO) {

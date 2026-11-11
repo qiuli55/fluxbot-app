@@ -19,6 +19,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -51,6 +54,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import org.json.JSONObject
 import top.qiuli55.fluxbot.data.BotDesktop
+import top.qiuli55.fluxbot.data.DesktopConfig
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Sheet
@@ -251,9 +255,73 @@ private class NetProbe(
         (t.javaClass.simpleName + ": " + (t.message ?: "")).take(140)
 }
 
-@SuppressLint("SetJavaScriptEnabled")
+/**
+ * 进桌面之前先向服务端要入口参数：隧道地址随隧道重启变化，凭据只在服务端。
+ * 拿不到就停在提示页，不在 App 里保留任何默认地址或密钥。
+ */
 @Composable
 fun DesktopScreen(botId: String) {
+    val store = LocalStore.current
+    var config by remember(botId) { mutableStateOf<DesktopConfig?>(null) }
+    var error by remember(botId) { mutableStateOf<String?>(null) }
+    var attempt by remember(botId) { mutableStateOf(0) }
+
+    LaunchedEffect(botId, attempt) {
+        config = null
+        error = null
+        runCatching { store.api.desktopConfig() }
+            .onSuccess { config = it }
+            .onFailure { error = it.message ?: "读取桌面配置失败" }
+    }
+
+    val current = config
+    when {
+        current == null -> DesktopNotice(
+            botId,
+            error ?: "正在连接 Bot 桌面…",
+            retry = if (error != null) { { attempt += 1 } } else null,
+        )
+        !current.configured -> DesktopNotice(botId, "桌面尚未配置", retry = null)
+        else -> DesktopView(botId, current)
+    }
+}
+
+/** 取配置期间 / 配置不可用时的占位页。 */
+@Composable
+private fun DesktopNotice(botId: String, text: String, retry: (() -> Unit)?) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val bot = store.bot(botId)
+    Column(Modifier.fillMaxSize().background(Flux.bg)) {
+        Row(
+            Modifier.fillMaxWidth().height(54.dp).padding(start = 6.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconBtn(FIcon.Back) { ui.back() }
+            Text(
+                bot?.name ?: "Bot 桌面",
+                fontSize = 14.5.sp,
+                fontWeight = FontWeight(560),
+                color = Flux.text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (retry != null) IconBtn(FIcon.Refresh) { retry() }
+        }
+        Column(
+            Modifier.fillMaxWidth().weight(1f).padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(text, fontSize = 13.sp, color = Flux.text3, textAlign = TextAlign.Center)
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun DesktopView(botId: String, cfg: DesktopConfig) {
     val store = LocalStore.current
     val ui = LocalUi.current
     val bot = store.bot(botId)
@@ -261,7 +329,7 @@ fun DesktopScreen(botId: String) {
     val view = LocalView.current
     val holder = remember { arrayOfNulls<WebView>(1) }
     val handler = remember { Handler(Looper.getMainLooper()) }
-    val remoteLog = remember { RemoteLog(BotDesktop.BRIDGE, BotDesktop.BRIDGE_KEY, profile) }
+    val remoteLog = remember(cfg) { RemoteLog(cfg.bridge, cfg.bridgeKey, profile) }
     val appCtx = LocalContext.current.applicationContext
     val version = remember {
         runCatching {
@@ -269,7 +337,7 @@ fun DesktopScreen(botId: String) {
             "ver ${pi.versionName}/${pi.versionCode}"
         }.getOrDefault("ver ?")
     }
-    val probe = remember { NetProbe(BotDesktop.BRIDGE, BotDesktop.HOST, BotDesktop.BRIDGE_KEY, version) }
+    val probe = remember(cfg) { NetProbe(cfg.bridge, cfg.gateway, cfg.bridgeKey, version) }
 
     var state by remember { mutableStateOf("连接中…") }
     var control by remember { mutableStateOf(false) }
@@ -289,14 +357,14 @@ fun DesktopScreen(botId: String) {
         }, 350)
     }
 
-    val connectJs = remember(botId) {
+    val connectJs = remember(cfg) {
         val args = listOf(
-            BotDesktop.HOST,
-            BotDesktop.TOKEN,
+            cfg.gateway,
+            cfg.token,
             profile,
-            BotDesktop.BRIDGE,
-            BotDesktop.BRIDGE_KEY,
-            BotDesktop.CONFIG_URL,
+            cfg.bridge,
+            cfg.bridgeKey,
+            cfg.configUrl.ifBlank { BotDesktop.CONFIG_URL },
         ).joinToString(",") { JSONObject.quote(it) }
         "window.Flux && window.Flux.connect($args)"
     }

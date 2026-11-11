@@ -283,11 +283,11 @@
     // 连接中/重连中显示居中动画；连上、出错、已断开都收起
     setLoading(!kind && text.indexOf('断开') < 0 && text.indexOf('中断') < 0, text);
   }
-  /* 日志走两条路：原生（HttpURLConnection 上报）、bridge /log */
+  /* 日志走两条路：原生（HttpURLConnection 上报）、bridge /log；远端上报仅在 debug 构建开启 */
   function log(text, kind) {
     try { if (window.FluxHost && FluxHost.onLog) FluxHost.onLog(String(text)); } catch (e) {}
     try {
-      if (!ctx || !ctx.bridge) return;
+      if (!ctx || !ctx.bridge || !ctx.debugLog) return;
       var logUrl = ctx.bridge + '/log?key=' + encodeURIComponent(ctx.bridgeKey) +
         '&tag=' + encodeURIComponent(ctx.profile);
       if (window.FluxNet && FluxNet.request) {
@@ -1184,14 +1184,17 @@
 
   /* ---------------- native entry points ---------------- */
   window.Flux = {
-    connect: function (host, token, profile, bridge, bridgeKey, configUrl) {
+    connect: function (host, token, profile, bridge, bridgeKey, configUrl, debugLog) {
       window.Flux.disconnect();
-      start({ host: host, token: token, profile: profile, bridge: bridge, bridgeKey: bridgeKey, configUrl: configUrl });
+      start({
+        host: host, token: token, profile: profile, bridge: bridge, bridgeKey: bridgeKey,
+        configUrl: configUrl, debugLog: !!debugLog
+      });
     },
     reconnect: function () {
       if (!ctx) return;
       var c = ctx;
-      window.Flux.connect(c.host, c.token, c.profile, c.bridge, c.bridgeKey, c.configUrl);
+      window.Flux.connect(c.host, c.token, c.profile, c.bridge, c.bridgeKey, c.configUrl, c.debugLog);
     },
     takeover: takeover,
     release: release,

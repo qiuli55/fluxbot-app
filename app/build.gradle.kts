@@ -18,7 +18,7 @@ android {
 
     // 发布签名：CI 用仓库 secret 还原 keystore 后通过环境变量注入。
     // 本地没设置时保持 debug 签名，assembleDebug / assembleRelease 都能直接跑。
-    val releaseKeystore = System.getenv("FLUXBOT_KEYSTORE_PATH")?.let { file(it) }
+    val releaseKeystore = System.getenv("FLUXBOT_KEYSTORE_PATH")?.let { file(it) }?.takeIf { it.exists() }
 
     signingConfigs {
         if (releaseKeystore != null) {
@@ -32,6 +32,12 @@ android {
     }
 
     buildTypes {
+        // debug 也走同一套签名：CI 的调试密钥每次随机生成，会导致新旧包无法覆盖安装。
+        debug {
+            if (releaseKeystore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         release {
             isMinifyEnabled = false
             if (releaseKeystore != null) {

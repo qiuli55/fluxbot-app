@@ -2,6 +2,7 @@ package top.qiuli55.fluxbot.data
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -166,6 +167,47 @@ class Api(context: Context) {
                 ?: throw ApiException("模型没有返回内容")
         }
 
+    /**
+     * 等这一轮助手回复。
+     *
+     * 公网入口对空闲连接约 20 秒就会断开（返回 502），而模型出完整回复要 30 秒以上，
+     * 所以不能干等 POST：POST 只负责触发，回复改从这里轮询增量事件取回。
+     */
+    suspend fun waitForReply(taskId: String, afterSeq: Int, timeoutMs: Long = 180_000): String {
+        var seq = afterSeq
+        var failures = 0
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            delay(700)
+            val events = runCatching { pollEvents(taskId, seq) }
+                .onSuccess { failures = 0 }
+                .onFailure {
+                    failures += 1
+                    if (failures >= 3) throw it
+                }
+                .getOrNull() ?: continue
+            for (event in events) {
+                seq = maxOf(seq, event.seq)
+                when (event.type) {
+                    "assistant_message" -> {
+                        val text = event.data.optJSONObject("message")
+                            ?.optString("content").orEmpty()
+                        if (text.isNotBlank()) return text
+                    }
+                    "assistant_error" -> {
+                        val reason = event.data.optString("error").ifBlank { "模型返回异常" }
+                        throw ApiException(reason)
+                    }
+                }
+            }
+        }
+        throw ApiException("等模型回复超时")
+    }
+
+    /** 发消息之前记下当前事件序号，之后只看比它新的回复事件。 */
+    suspend fun lastSeq(taskId: String): Int =
+        runCatching { pollEvents(taskId, 0).maxOfOrNull { it.seq } ?: 0 }.getOrDefault(0)
+
     /** 拉取任务的历史消息，返回 (role, content) 列表。 */
     suspend fun listMessages(taskId: String): List<Pair<String, String>> =
         withContext(Dispatchers.IO) {
@@ -174,6 +216,24 @@ class Api(context: Context) {
             (0 until data.length()).map {
                 val o = data.getJSONObject(it)
                 o.optString("role") to o.optString("content")
+            }
+        }
+
+    /** 一条任务增量事件；seq 在同一任务内单调递增。 */
+    data class TaskEvent(val seq: Int, val type: String, val data: JSONObject)
+
+    /** 取回 afterSeq 之后的增量事件（对话回复的轮询源）。 */
+    suspend fun pollEvents(taskId: String, afterSeq: Int): List<TaskEvent> =
+        withContext(Dispatchers.IO) {
+            val array = request("GET", "/api/v1/tasks/$taskId/events?after_seq=$afterSeq", null)
+                .optJSONArray("data") ?: JSONArray()
+            (0 until array.length()).mapNotNull { index ->
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                TaskEvent(
+                    seq = item.optInt("seq"),
+                    type = item.optString("type"),
+                    data = item.optJSONObject("data") ?: JSONObject(),
+                )
             }
         }
 

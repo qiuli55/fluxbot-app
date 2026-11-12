@@ -5,10 +5,8 @@ import top.qiuli55.fluxbot.BuildConfig
 /**
  * Hermes Bot Desktop 的入口参数。
  *
- * 每个 Bot 对应一台云电脑上的一个 Hermes profile，
- * profile 名由 bot id 前 8 位推导（Hermes 只允许小写字母数字）。
- *
- * 连接参数在构建时通过 FLUXBOT_DESKTOP_* 环境变量注入，不再硬编码在源码里。
+ * 连接参数现在由后端 /desktop/session 下发，profile 也由服务端计算。
+ * 这里的 FLUXBOT_DESKTOP_* 构建期字段只作为可选的兜底，不再要求配置。
  */
 object BotDesktop {
     /**

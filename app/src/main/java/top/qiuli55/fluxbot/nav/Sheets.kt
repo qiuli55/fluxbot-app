@@ -7,6 +7,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -63,9 +64,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Api
+import top.qiuli55.fluxbot.data.ApiException
 import top.qiuli55.fluxbot.data.Bot
 import top.qiuli55.fluxbot.data.DeviceLogin
 import top.qiuli55.fluxbot.data.ModelCatalog
@@ -128,6 +131,13 @@ sealed interface Sheet {
 }
 
 private val EMAIL_RE = Regex("^[^@\\s]+@[^@\\s]+\\.[A-Za-z]{2,}$")
+
+private fun pairingMessage(error: Throwable): String = when {
+    error is ApiException && error.code == "invalid_pairing_code" -> "配对码无效或已过期"
+    error is ApiException && error.code == "rate_limited" -> "尝试过于频繁，请稍后再试"
+    error is ApiException && error.status == 429 -> "尝试过于频繁，请稍后再试"
+    else -> error.message?.takeIf { it.isNotBlank() } ?: "配对失败"
+}
 
 @Composable
 fun SheetHost() {
@@ -976,36 +986,98 @@ private fun ServerSheet() {
     val scope = rememberCoroutineScope()
     var url by remember { mutableStateOf(store.api.baseUrl) }
     var token by remember { mutableStateOf(store.api.token) }
+    var code by remember { mutableStateOf("") }
     var testing by remember { mutableStateOf(false) }
+    var pairing by remember { mutableStateOf(false) }
+    var revoking by remember { mutableStateOf(false) }
 
     SheetFrame("连接服务器") {
-        SheetHint("Flux Bot 后端地址与访问令牌。连上后会自动拉取远端 Bot。", top = 0)
+        SheetHint("输入服务器地址和配对码，即可把本机绑定到账号。", top = 0)
         Spacer(Modifier.height(12.dp))
         FieldLabel("服务器地址")
         Spacer(Modifier.height(8.dp))
         FluxInput(url, { url = it }, placeholder = "https://…")
         Spacer(Modifier.height(12.dp))
-        FieldLabel("访问令牌")
+        FieldLabel("配对码")
         Spacer(Modifier.height(8.dp))
-        FluxInput(token, { token = it }, placeholder = "fb_…")
+        FluxInput(
+            code,
+            { raw ->
+                code = raw.uppercase()
+                    .filter { c -> c in 'A'..'Z' || c in '0'..'9' }
+                    .take(8)
+            },
+            placeholder = "8 位配对码",
+            keyboardType = KeyboardType.Ascii,
+            center = true,
+        )
+        SheetHint("在服务器上运行 `flux devices pair` 或调用管理接口获取 8 位配对码。")
         Spacer(Modifier.height(16.dp))
         PrimaryButton(
-            if (testing) "连接中…" else "测试并保存",
-            enabled = !testing && url.isNotBlank(),
+            if (pairing) "正在配对…" else "配对并连接",
+            enabled = !pairing && !testing && url.isNotBlank() && code.length == 8,
         ) {
+            pairing = true
+            scope.launch {
+                store.api.baseUrl = url
+                try {
+                    val newToken = store.api.pairDevice(
+                        code,
+                        Build.MODEL.ifBlank { "Android" },
+                    )
+                    store.api.token = newToken
+                    token = newToken
+                    store.api.health()
+                    val bots = try {
+                        store.api.listBots()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        null
+                    }
+                    bots?.let { store.mergeRemoteBots(it) }
+                    pairing = false
+                    code = ""
+                    ui.closeSheet()
+                    ui.showToast("配对成功，服务器已连接")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    pairing = false
+                    ui.showToast(pairingMessage(e))
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        FieldLabel("已有令牌（高级）")
+        Spacer(Modifier.height(8.dp))
+        FluxInput(token, { token = it }, placeholder = "fb_… 或 fbd_…")
+        Spacer(Modifier.height(10.dp))
+        SecondaryButton(if (testing) "连接中…" else "测试并保存") {
+            if (testing || url.isBlank()) return@SecondaryButton
             testing = true
             scope.launch {
                 store.api.baseUrl = url
                 store.api.token = token
-                val result = runCatching { store.api.health() }
-                testing = false
-                result.onSuccess {
+                try {
+                    store.api.health()
+                    val bots = try {
+                        store.api.listBots()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        null
+                    }
+                    bots?.let { store.mergeRemoteBots(it) }
+                    testing = false
                     ui.closeSheet()
                     ui.showToast("服务器已连接")
-                    runCatching { store.api.listBots() }
-                        .onSuccess { store.mergeRemoteBots(it) }
-                }.onFailure {
-                    ui.showToast(it.message ?: "连接失败")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    testing = false
+                    ui.showToast(e.message ?: "连接失败")
                 }
             }
         }
@@ -1013,8 +1085,31 @@ private fun ServerSheet() {
         SecondaryButton("恢复默认地址") {
             url = Api.DEFAULT_BASE_URL
             token = ""
+            store.api.token = ""
         }
-        SheetHint("令牌只保存在本机，请填写服务器提供的访问令牌。")
+        if (store.api.token.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            SecondaryButton(if (revoking) "正在撤销…" else "退出登录 / 撤销本机") {
+                if (revoking) return@SecondaryButton
+                revoking = true
+                scope.launch {
+                    try {
+                        store.api.revokeThisDevice()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        revoking = false
+                        ui.showToast("撤销失败：" + (e.message ?: "未知错误"))
+                        return@launch
+                    }
+                    store.api.token = ""
+                    token = ""
+                    revoking = false
+                    ui.showToast("已撤销本机令牌")
+                }
+            }
+        }
+        SheetHint("配对码由服务器一次性签发；已有令牌只保存在本机，适用于高级场景。")
     }
 }
 

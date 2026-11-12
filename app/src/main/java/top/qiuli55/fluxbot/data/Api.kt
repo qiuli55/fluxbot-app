@@ -51,6 +51,17 @@ data class ModelCatalog(
     val options: List<RemoteModel>,
 )
 
+/** 后端签发的一次云桌面会话；profile 由服务端计算，客户端直接使用。 */
+data class DesktopSession(
+    val host: String,
+    val token: String,
+    val bridge: String,
+    val bridgeKey: String,
+    val profile: String,
+    val ticket: String,
+    val expiresAt: String,
+)
+
 /** 一个外部连接器（当前只有 GitHub）。 */
 data class RemoteConnector(
     val id: String,
@@ -141,6 +152,46 @@ class Api(context: Context) {
     suspend fun listBots(): List<RemoteBot> = withContext(Dispatchers.IO) {
         val data = request("GET", "/api/v1/bots", null).optJSONArray("data") ?: JSONArray()
         (0 until data.length()).map { parseBot(data.getJSONObject(it)) }
+    }
+
+    // ---------- 设备配对 ----------
+
+    /** 用 8 位配对码换取本机设备令牌；返回 fbd_ 开头的新令牌。 */
+    suspend fun pairDevice(code: String, deviceName: String): String =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject()
+                .put("code", code.trim().uppercase())
+                .put("device_name", deviceName)
+            val data = request("POST", "/api/v1/devices/pair", body).getJSONObject("data")
+            data.optStringOrEmpty("token").ifBlank {
+                throw ApiException("配对失败：服务器未返回令牌")
+            }
+        }
+
+    /** 撤销本机令牌；令牌已失效（401）也视为退出成功。 */
+    suspend fun revokeThisDevice(): Unit = withContext(Dispatchers.IO) {
+        try {
+            request("POST", "/api/v1/devices/me/revoke", JSONObject())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ApiException) {
+            if (e.status != 401) throw e
+        }
+    }
+
+    /** 向服务端换取云桌面连接参数；gateway_token 可能为空，此时改用 ticket。 */
+    suspend fun desktopSession(botId: String): DesktopSession = withContext(Dispatchers.IO) {
+        val data = request("POST", "/api/v1/bots/$botId/desktop/session", JSONObject())
+            .getJSONObject("data")
+        DesktopSession(
+            host = data.optStringOrEmpty("host"),
+            token = data.optStringOrEmpty("gateway_token"),
+            bridge = data.optStringOrEmpty("bridge"),
+            bridgeKey = data.optStringOrEmpty("bridge_key"),
+            profile = data.optStringOrEmpty("profile"),
+            ticket = data.optStringOrEmpty("ticket"),
+            expiresAt = data.optStringOrEmpty("expires_at"),
+        )
     }
 
     suspend fun createBot(name: String, shape: String, palette: String): RemoteBot =

@@ -22,6 +22,7 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,9 +52,11 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import top.qiuli55.fluxbot.BuildConfig
 import top.qiuli55.fluxbot.data.BotDesktop
+import top.qiuli55.fluxbot.data.DesktopSession
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Sheet
@@ -60,6 +64,7 @@ import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
 import top.qiuli55.fluxbot.ui.IconBtn
 import top.qiuli55.fluxbot.ui.Pill
+import top.qiuli55.fluxbot.ui.SecondaryButton
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
@@ -186,22 +191,21 @@ private fun hostOf(raw: String): String? {
     }.getOrNull()?.takeIf { it.isNotBlank() }
 }
 
-/** 与页面里的 HOST_RE 保持一致：只放行 https + 内置主机 / 轮换隧道域名。 */
-private fun isAllowedNativeUrl(raw: String): Boolean {
+/** 与页面里的 HOST_RE 保持一致：只放行 https + 本次会话主机 / 轮换隧道域名。 */
+private fun isAllowedNativeUrl(raw: String, allowedHosts: Set<String>): Boolean {
     if (raw.isBlank()) return false
     val uri = runCatching { URI(raw.trim()) }.getOrNull() ?: return false
     if (!"https".equals(uri.scheme, ignoreCase = true)) return false
     val host = uri.host?.lowercase()?.takeIf { it.isNotBlank() } ?: return false
     if (TUNNEL_HOST_RE.matches(host)) return true
-    return host == hostOf(BotDesktop.HOST) ||
-        host == hostOf(BotDesktop.BRIDGE) ||
-        host == hostOf(BotDesktop.CONFIG_URL)
+    return host in allowedHosts
 }
 
 /** 原生 HTTP 兜底：WebView 里 fetch 被拦时，页面改走这里（仍直连，不经中转）。 */
 private class NativeHttp(
     private val handler: Handler,
     private val webView: () -> WebView?,
+    private val allowedHosts: Set<String>,
 ) {
     private val executor = Executors.newFixedThreadPool(2) { r ->
         Thread(r, "flux-desktop-http").apply { isDaemon = true }
@@ -214,7 +218,7 @@ private class NativeHttp(
             if (!DesktopTrust.trusted) return@execute
             var ok = "0"
             var text = ""
-            if (!isAllowedNativeUrl(url)) {
+            if (!isAllowedNativeUrl(url, allowedHosts)) {
                 text = "blocked host"
             } else {
                 runCatching {
@@ -301,29 +305,62 @@ private class NetProbe(
         (t.javaClass.simpleName + ": " + (t.message ?: "")).take(140)
 }
 
-@SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun DesktopScreen(botId: String) {
-    if (!BotDesktop.isConfigured) {
+    val store = LocalStore.current
+    var session by remember(botId) { mutableStateOf<DesktopSession?>(null) }
+    var loading by remember(botId) { mutableStateOf(true) }
+    var error by remember(botId) { mutableStateOf("") }
+    var attempt by remember(botId) { mutableStateOf(0) }
+
+    LaunchedEffect(botId, attempt) {
+        loading = true
+        error = ""
+        session = null
+        try {
+            session = store.api.desktopSession(botId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            error = e.message?.takeIf { it.isNotBlank() } ?: "云桌面未配置"
+        } finally {
+            loading = false
+        }
+    }
+
+    val active = session
+    if (active == null) {
         Column(Modifier.fillMaxSize().background(Flux.bg).padding(24.dp)) {
             Text(
-                "云桌面未配置：构建时需注入 FLUXBOT_DESKTOP_* 参数",
+                if (loading) "正在获取桌面会话…" else error.ifBlank { "云桌面未配置" },
                 fontSize = 13.sp,
                 color = Flux.text2,
                 lineHeight = 21.sp,
             )
+            if (!loading) {
+                Spacer(Modifier.height(16.dp))
+                SecondaryButton("重试") { attempt += 1 }
+            }
         }
         return
     }
 
+    DesktopView(botId, active)
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun DesktopView(botId: String, session: DesktopSession) {
     val store = LocalStore.current
     val ui = LocalUi.current
     val bot = store.bot(botId)
-    val profile = remember(botId) { BotDesktop.profile(botId) }
+    val profile = session.profile
     val view = LocalView.current
     val holder = remember { arrayOfNulls<WebView>(1) }
     val handler = remember { Handler(Looper.getMainLooper()) }
-    val remoteLog = remember { RemoteLog(BotDesktop.BRIDGE, BotDesktop.BRIDGE_KEY, profile) }
+    val remoteLog = remember(session) {
+        RemoteLog(session.bridge, session.bridgeKey, profile)
+    }
     val appCtx = LocalContext.current.applicationContext
     val version = remember {
         runCatching {
@@ -331,7 +368,18 @@ fun DesktopScreen(botId: String) {
             "ver ${pi.versionName}/${pi.versionCode}"
         }.getOrDefault("ver ?")
     }
-    val probe = remember { NetProbe(BotDesktop.BRIDGE, BotDesktop.HOST, BotDesktop.BRIDGE_KEY, version) }
+    val probe = remember(session) {
+        NetProbe(session.bridge, session.host, session.bridgeKey, version)
+    }
+    val allowedHosts = remember(session) {
+        setOfNotNull(
+            hostOf(session.host),
+            hostOf(session.bridge),
+            hostOf(BotDesktop.CONFIG_URL),
+            hostOf(BotDesktop.HOST),
+            hostOf(BotDesktop.BRIDGE),
+        )
+    }
 
     var state by remember { mutableStateOf("连接中…") }
     var control by remember { mutableStateOf(false) }
@@ -351,15 +399,16 @@ fun DesktopScreen(botId: String) {
         }, 350)
     }
 
-    val connectJs = remember(botId) {
+    val connectJs = remember(session) {
         val args = listOf(
-            JSONObject.quote(BotDesktop.HOST),
-            JSONObject.quote(BotDesktop.TOKEN),
+            JSONObject.quote(session.host),
+            JSONObject.quote(session.token),
             JSONObject.quote(profile),
-            JSONObject.quote(BotDesktop.BRIDGE),
-            JSONObject.quote(BotDesktop.BRIDGE_KEY),
+            JSONObject.quote(session.bridge),
+            JSONObject.quote(session.bridgeKey),
             JSONObject.quote(BotDesktop.CONFIG_URL),
             if (BuildConfig.DEBUG) "true" else "false",
+            JSONObject.quote(session.ticket),
         ).joinToString(",")
         "window.Flux && window.Flux.connect($args)"
     }
@@ -494,7 +543,10 @@ fun DesktopScreen(botId: String) {
                         ),
                         "FluxHost",
                     )
-                    addJavascriptInterface(NativeHttp(handler) { holder[0] }, "FluxNet")
+                    addJavascriptInterface(
+                        NativeHttp(handler, { holder[0] }, allowedHosts),
+                        "FluxNet",
+                    )
                     webChromeClient = object : WebChromeClient() {
                         override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
                             if (BuildConfig.DEBUG) {

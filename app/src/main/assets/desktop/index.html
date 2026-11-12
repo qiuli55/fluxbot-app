@@ -599,6 +599,7 @@
       var settled = false;
       var done = function (fn, arg) { if (!settled) { settled = true; fn(arg); } };
       var url = 'wss://' + ctx.host + '/api/ws?token=' + encodeURIComponent(ctx.token);
+      if (ctx.ticket) url += '&ticket=' + encodeURIComponent(ctx.ticket);
       var sock = ws = new WebSocket(url);
       sock.onopen = function () { log('网关已打开'); };
       sock.onmessage = function (ev) {
@@ -1184,17 +1185,17 @@
 
   /* ---------------- native entry points ---------------- */
   window.Flux = {
-    connect: function (host, token, profile, bridge, bridgeKey, configUrl, debugLog) {
+    connect: function (host, token, profile, bridge, bridgeKey, configUrl, debugLog, ticket) {
       window.Flux.disconnect();
       start({
         host: host, token: token, profile: profile, bridge: bridge, bridgeKey: bridgeKey,
-        configUrl: configUrl, debugLog: !!debugLog
+        configUrl: configUrl, debugLog: !!debugLog, ticket: ticket || ''
       });
     },
     reconnect: function () {
       if (!ctx) return;
       var c = ctx;
-      window.Flux.connect(c.host, c.token, c.profile, c.bridge, c.bridgeKey, c.configUrl, c.debugLog);
+      window.Flux.connect(c.host, c.token, c.profile, c.bridge, c.bridgeKey, c.configUrl, c.debugLog, c.ticket);
     },
     takeover: takeover,
     release: release,

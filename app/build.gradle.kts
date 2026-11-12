@@ -12,20 +12,9 @@ android {
         applicationId = "top.qiuli55.fluxbot"
         minSdk = 26
         targetSdk = 34
-        versionCode = 27
-        versionName = "0.3.15"
+        versionCode = 28
+        versionName = "0.3.16"
 
-        // 云桌面连接参数不落源码：优先读环境变量，其次读 Gradle 属性，缺省为空。
-        fun configValue(name: String): String =
-            System.getenv(name) ?: project.findProperty(name)?.toString() ?: ""
-
-        fun javaString(value: String): String =
-            "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
-
-        buildConfigField("String", "DESKTOP_HOST", javaString(configValue("FLUXBOT_DESKTOP_HOST")))
-        buildConfigField("String", "DESKTOP_TOKEN", javaString(configValue("FLUXBOT_DESKTOP_TOKEN")))
-        buildConfigField("String", "DESKTOP_BRIDGE", javaString(configValue("FLUXBOT_DESKTOP_BRIDGE")))
-        buildConfigField("String", "DESKTOP_BRIDGE_KEY", javaString(configValue("FLUXBOT_DESKTOP_BRIDGE_KEY")))
     }
 
     // 发布签名：CI 用仓库 secret 还原 keystore 后通过环境变量注入。

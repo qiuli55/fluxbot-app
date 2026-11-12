@@ -376,8 +376,6 @@ private fun DesktopView(botId: String, session: DesktopSession) {
             hostOf(session.host),
             hostOf(session.bridge),
             hostOf(BotDesktop.CONFIG_URL),
-            hostOf(BotDesktop.HOST),
-            hostOf(BotDesktop.BRIDGE),
         )
     }
 

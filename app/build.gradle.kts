@@ -12,8 +12,9 @@ android {
         applicationId = "top.qiuli55.fluxbot"
         minSdk = 26
         targetSdk = 34
-        versionCode = 27
-        versionName = "0.3.15"
+        versionCode = 28
+        versionName = "0.3.16"
+
     }
 
     // 发布签名：CI 用仓库 secret 还原 keystore 后通过环境变量注入。
@@ -39,7 +40,12 @@ android {
             }
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             if (releaseKeystore != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -57,6 +63,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -80,4 +87,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // JVM 单元测试：只测纯解析 / 合并逻辑，不拉起 Android 框架或 Robolectric。
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

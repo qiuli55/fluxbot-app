@@ -38,7 +38,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Route
@@ -207,6 +209,22 @@ fun MemoryScreen() {
                     ui.showToast("没有识别到可导入的条目")
                 } else if (target == null) {
                     ui.showToast("先创建一个 Bot")
+                } else if (target.remote) {
+                    ui.scope.launch {
+                        try {
+                            lines.forEach {
+                                store.api.addMemory(target.id, it, kind = "fact", relevance = "direct")
+                            }
+                            store.refreshBotMemories(target.id)
+                            ui.back()
+                            ui.push(Route.BotDetail(target.id))
+                            ui.showToast("已导入 ${lines.size} 条记忆")
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            ui.showToast(e.message ?: "导入记忆失败")
+                        }
+                    }
                 } else {
                     lines.forEach { store.addMemory(target.id, it, "import") }
                     ui.back()

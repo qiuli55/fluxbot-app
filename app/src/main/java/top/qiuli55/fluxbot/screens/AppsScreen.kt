@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,11 +36,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import top.qiuli55.fluxbot.data.DemoData
+import top.qiuli55.fluxbot.data.RemoteConnector
 import top.qiuli55.fluxbot.data.Store
 import top.qiuli55.fluxbot.nav.AppUi
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
+import top.qiuli55.fluxbot.nav.Sheet
 import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
 import top.qiuli55.fluxbot.ui.PageHead
@@ -49,8 +53,33 @@ fun AppsScreen() {
     val store = LocalStore.current
     val ui = LocalUi.current
     val connected = store.current().connected
+    val signedIn = store.api.token.isNotBlank()
+    var github by remember { mutableStateOf<RemoteConnector?>(null) }
     var cat by remember { mutableStateOf("全部") }
     var query by remember { mutableStateOf("") }
+
+    // 登录后以后端连接器为准（目前只有 GitHub）；关闭弹层后重新拉一次状态。
+    LaunchedEffect(signedIn, ui.sheet) {
+        if (!signedIn) {
+            github = null
+            return@LaunchedEffect
+        }
+        try {
+            github = store.api.listConnectors().firstOrNull { it.id == "github" }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 读取失败时保留本地占位状态，不打断应用列表。
+        }
+    }
+
+    fun appConnected(id: String): Boolean =
+        if (id == "github" && signedIn && github != null) github?.connected == true
+        else connected.contains(id)
+
+    fun appAccount(id: String): String =
+        if (id == "github" && signedIn && github?.connected == true) github?.account.orEmpty()
+        else ""
 
     val all = DemoData.apps
     val q = query.trim().lowercase()
@@ -58,7 +87,7 @@ fun AppsScreen() {
     val visible = if (q.isEmpty()) byCat else byCat.filter { it.name.lowercase().contains(q) }
     val featured = if (cat == "全部") visible.filter { it.featured } else emptyList()
     val rest = if (cat == "全部") visible.filterNot { it.featured } else visible
-    val connectedCount = all.count { connected.contains(it.id) }
+    val connectedCount = all.count { appConnected(it.id) }
 
     Box(Modifier.fillMaxSize().background(Flux.bg)) {
         Column(Modifier.fillMaxSize()) {
@@ -103,8 +132,8 @@ fun AppsScreen() {
                 if (featured.isNotEmpty()) {
                     SectionTitle("推荐 · 常用")
                     featured.forEach { app ->
-                        AppRow(app, connected.contains(app.id)) {
-                            toggleApp(store, ui, app)
+                        AppRow(app, appConnected(app.id), appAccount(app.id)) {
+                            toggleApp(store, ui, app, signedIn)
                         }
                     }
                 }
@@ -119,8 +148,8 @@ fun AppsScreen() {
                     }
                 } else {
                     rest.forEach { app ->
-                        AppRow(app, connected.contains(app.id)) {
-                            toggleApp(store, ui, app)
+                        AppRow(app, appConnected(app.id), appAccount(app.id)) {
+                            toggleApp(store, ui, app, signedIn)
                         }
                     }
                 }
@@ -165,7 +194,12 @@ fun AppsScreen() {
     }
 }
 
-private fun toggleApp(store: Store, ui: AppUi, app: DemoData.AppInfo) {
+private fun toggleApp(store: Store, ui: AppUi, app: DemoData.AppInfo, signedIn: Boolean) {
+    if (app.id == "github" && signedIn) {
+        ui.haptic(8)
+        ui.sheet = Sheet.Connector("github")
+        return
+    }
     val on = store.current().connected.contains(app.id)
     store.toggleApp(app.id)
     ui.haptic(8)
@@ -198,7 +232,12 @@ private fun SectionTitle(text: String) {
 }
 
 @Composable
-private fun AppRow(app: DemoData.AppInfo, connected: Boolean, onToggle: () -> Unit) {
+private fun AppRow(
+    app: DemoData.AppInfo,
+    connected: Boolean,
+    account: String,
+    onToggle: () -> Unit,
+) {
     Column {
         Row(
             Modifier.fillMaxWidth().padding(vertical = 12.dp),
@@ -220,7 +259,7 @@ private fun AppRow(app: DemoData.AppInfo, connected: Boolean, onToggle: () -> Un
                 Text(app.name, fontSize = 14.5.sp, fontWeight = FontWeight(460), color = Flux.text)
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    app.desc,
+                    if (connected && account.isNotBlank()) "@$account" else app.desc,
                     fontSize = 11.5.sp,
                     color = Flux.text3,
                     lineHeight = 16.7.sp,

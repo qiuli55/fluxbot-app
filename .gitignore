@@ -14,3 +14,6 @@ captures/
 *.aab
 dist/
 keystore/
+
+# Kotlin 编译器本地缓存
+.kotlin/

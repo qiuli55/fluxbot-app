@@ -7,8 +7,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.webkit.ConsoleMessage
@@ -52,9 +54,14 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
-import top.qiuli55.fluxbot.data.BotDesktop
+import top.qiuli55.fluxbot.BuildConfig
 import top.qiuli55.fluxbot.data.DesktopConfig
+import top.qiuli55.fluxbot.data.DesktopSession
+import top.qiuli55.fluxbot.data.alignedWith
+import top.qiuli55.fluxbot.data.desktopConfigUrl
+import top.qiuli55.fluxbot.data.desktopErrorMessage
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Sheet
@@ -63,6 +70,7 @@ import top.qiuli55.fluxbot.ui.Flux
 import top.qiuli55.fluxbot.ui.IconBtn
 import top.qiuli55.fluxbot.ui.Pill
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.util.concurrent.Executors
 
@@ -70,6 +78,12 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
+}
+
+/** 只有当前加载的是本地桌面页时，JS 桥才可信；页面一旦跳走立即失效。 */
+private object DesktopTrust {
+    @Volatile
+    var trusted: Boolean = false
 }
 
 /** 网页通过它把连接状态回吐给原生，并借用原生能力（剪贴板/键盘/横屏/全屏）。 */
@@ -84,6 +98,7 @@ private class HostBridge(
 ) {
     @JavascriptInterface
     fun onState(json: String) {
+        if (!DesktopTrust.trusted) return
         val obj = runCatching { JSONObject(json) }.getOrNull() ?: return
         val text = obj.optString("text")
         val control = obj.optBoolean("control")
@@ -92,12 +107,14 @@ private class HostBridge(
 
     @JavascriptInterface
     fun onLog(msg: String) {
+        if (!DesktopTrust.trusted) return
         onLog(msg)
     }
 
     /** 桌面复制 → 手机剪贴板 */
     @JavascriptInterface
     fun setClipboard(text: String) {
+        if (!DesktopTrust.trusted) return
         runCatching {
             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("fluxbot-desktop", text))
@@ -106,15 +123,19 @@ private class HostBridge(
 
     /** 手机剪贴板 → 桌面（页面拿去做 clipboardPasteFrom） */
     @JavascriptInterface
-    fun getClipboard(): String = runCatching {
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = cm.primaryClip
-        if (clip == null || clip.itemCount <= 0) "" else clip.getItemAt(0).coerceToText(context).toString()
-    }.getOrDefault("")
+    fun getClipboard(): String {
+        if (!DesktopTrust.trusted) return ""
+        return runCatching {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip
+            if (clip == null || clip.itemCount <= 0) "" else clip.getItemAt(0).coerceToText(context).toString()
+        }.getOrDefault("")
+    }
 
     /** 页面内 focus 拉不起软键盘时，由原生强制弹一次 */
     @JavascriptInterface
     fun showKeyboard() {
+        if (!DesktopTrust.trusted) return
         handler.post {
             val wv = webView() ?: return@post
             wv.requestFocus()
@@ -125,11 +146,13 @@ private class HostBridge(
 
     @JavascriptInterface
     fun setFullscreen(on: Int) {
+        if (!DesktopTrust.trusted) return
         handler.post { onFullscreen(on != 0) }
     }
 
     @JavascriptInterface
     fun setLandscape(on: Int) {
+        if (!DesktopTrust.trusted) return
         handler.post { onLandscape(on != 0) }
     }
 }
@@ -141,6 +164,7 @@ private class RemoteLog(private val base: String, private val key: String, priva
     }
 
     fun send(msg: String) {
+        if (!BuildConfig.DEBUG) return
         val line = msg.take(800)
         executor.execute {
             runCatching {
@@ -159,10 +183,33 @@ private class RemoteLog(private val base: String, private val key: String, priva
     }
 }
 
+/** 轮换隧道的域名规则，和页面 index.html 里的 HOST_RE 一致。 */
+private val TUNNEL_HOST_RE = Regex("^[a-z0-9][a-z0-9-]*\\.trycloudflare\\.com$", RegexOption.IGNORE_CASE)
+
+/** 解析允许访问的主机：HOST 是裸域名，BRIDGE/CONFIG_URL 是完整地址。 */
+private fun hostOf(raw: String): String? {
+    if (raw.isBlank()) return null
+    return runCatching {
+        val s = raw.trim()
+        URI(if (s.contains("://")) s else "https://$s").host?.lowercase()
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+}
+
+/** 与页面里的 HOST_RE 保持一致：只放行 https + 本次会话主机 / 轮换隧道域名。 */
+private fun isAllowedNativeUrl(raw: String, allowedHosts: Set<String>): Boolean {
+    if (raw.isBlank()) return false
+    val uri = runCatching { URI(raw.trim()) }.getOrNull() ?: return false
+    if (!"https".equals(uri.scheme, ignoreCase = true)) return false
+    val host = uri.host?.lowercase()?.takeIf { it.isNotBlank() } ?: return false
+    if (TUNNEL_HOST_RE.matches(host)) return true
+    return host in allowedHosts
+}
+
 /** 原生 HTTP 兜底：WebView 里 fetch 被拦时，页面改走这里（仍直连，不经中转）。 */
 private class NativeHttp(
     private val handler: Handler,
     private val webView: () -> WebView?,
+    private val allowedHosts: Set<String>,
 ) {
     private val executor = Executors.newFixedThreadPool(2) { r ->
         Thread(r, "flux-desktop-http").apply { isDaemon = true }
@@ -170,30 +217,36 @@ private class NativeHttp(
 
     @JavascriptInterface
     fun request(id: String, method: String, url: String, body: String) {
+        if (!DesktopTrust.trusted) return
         executor.execute {
+            if (!DesktopTrust.trusted) return@execute
             var ok = "0"
             var text = ""
-            runCatching {
-                val conn = URL(url).openConnection() as HttpURLConnection
-                conn.requestMethod = if (method.isBlank()) "GET" else method.uppercase()
-                conn.connectTimeout = 12000
-                conn.readTimeout = 90000
-                if (body.isNotEmpty()) {
-                    conn.doOutput = true
-                    conn.setRequestProperty("Content-Type", "text/plain; charset=utf-8")
-                    conn.outputStream.use { it.write(body.toByteArray()) }
-                }
-                val code = conn.responseCode
-                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                val payload = stream?.bufferedReader()?.use { it.readText() } ?: ""
-                conn.disconnect()
-                if (code in 200..299) {
-                    ok = "1"
-                    text = payload
-                } else {
-                    text = "HTTP $code " + payload.take(200)
-                }
-            }.onFailure { text = err(it) }
+            if (!isAllowedNativeUrl(url, allowedHosts)) {
+                text = "blocked host"
+            } else {
+                runCatching {
+                    val conn = URL(url).openConnection() as HttpURLConnection
+                    conn.requestMethod = if (method.isBlank()) "GET" else method.uppercase()
+                    conn.connectTimeout = 12000
+                    conn.readTimeout = 90000
+                    if (body.isNotEmpty()) {
+                        conn.doOutput = true
+                        conn.setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                        conn.outputStream.use { it.write(body.toByteArray()) }
+                    }
+                    val code = conn.responseCode
+                    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                    val payload = stream?.bufferedReader()?.use { it.readText() } ?: ""
+                    conn.disconnect()
+                    if (code in 200..299) {
+                        ok = "1"
+                        text = payload
+                    } else {
+                        text = "HTTP $code " + payload.take(200)
+                    }
+                }.onFailure { text = err(it) }
+            }
             val js = "window.Flux && window.Flux.__http(" + JSONObject.quote(id) + "," +
                 JSONObject.quote(ok) + "," + JSONObject.quote(text.take(4000)) + ")"
             handler.post { webView()?.evaluateJavascript(js, null) }
@@ -216,6 +269,7 @@ private class NetProbe(
     }
 
     fun run(report: (String) -> Unit) {
+        if (!BuildConfig.DEBUG) return
         executor.execute {
             val bridgeHost = runCatching { URL(bridge).host }.getOrDefault(bridge)
             val gatewayHost = runCatching { URL("https://$gateway").host }.getOrDefault(gateway)
@@ -256,37 +310,65 @@ private class NetProbe(
 }
 
 /**
- * 进桌面之前先向服务端要入口参数：隧道地址随隧道重启变化，凭据只在服务端。
- * 拿不到就停在提示页，不在 App 里保留任何默认地址或密钥。
+ * 进桌面之前先向服务端要入口：先 GET 全局配置，再为本 Bot 换一次短期会话。
+ * 任一步失败或服务端判定未配置，都停在带返回 / 重试的提示页，不保留默认地址或密钥。
  */
 @Composable
 fun DesktopScreen(botId: String) {
     val store = LocalStore.current
     var config by remember(botId) { mutableStateOf<DesktopConfig?>(null) }
-    var error by remember(botId) { mutableStateOf<String?>(null) }
+    var session by remember(botId) { mutableStateOf<DesktopSession?>(null) }
+    var notice by remember(botId) { mutableStateOf("正在连接 Bot 桌面…") }
+    var retryable by remember(botId) { mutableStateOf(false) }
     var attempt by remember(botId) { mutableStateOf(0) }
 
     LaunchedEffect(botId, attempt) {
         config = null
-        error = null
-        runCatching { store.api.desktopConfig() }
-            .onSuccess { config = it }
-            .onFailure { error = it.message ?: "读取桌面配置失败" }
+        session = null
+        notice = "正在连接 Bot 桌面…"
+        retryable = false
+        try {
+            val cfg = store.api.desktopConfig()
+            if (!cfg.configured) {
+                notice = "桌面尚未配置"
+                retryable = true
+                return@LaunchedEffect
+            }
+            val active = store.api.desktopSession(botId).alignedWith(cfg, botId)
+            config = cfg
+            session = active
+            if (BuildConfig.DEBUG) {
+                // 只记录布尔状态与 profile，绝不打印 token / bridgeKey
+                Log.d(
+                    "FluxDesktop",
+                    "ready profile=${active.profile} ticket=${active.ticket.isNotBlank()}" +
+                        " token=${active.token.isNotBlank()}",
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            notice = desktopErrorMessage(e)
+            retryable = true
+            if (BuildConfig.DEBUG) {
+                Log.w("FluxDesktop", "open failed: ${e.javaClass.simpleName}")
+            }
+        }
     }
 
-    val current = config
+    val activeConfig = config
+    val activeSession = session
     when {
-        current == null -> DesktopNotice(
+        activeConfig != null && activeSession != null -> DesktopView(botId, activeConfig, activeSession)
+        else -> DesktopNotice(
             botId,
-            error ?: "正在连接 Bot 桌面…",
-            retry = if (error != null) { { attempt += 1 } } else null,
+            notice,
+            retry = if (retryable) ({ attempt += 1 }) else null,
         )
-        !current.configured -> DesktopNotice(botId, "桌面尚未配置", retry = null)
-        else -> DesktopView(botId, current)
     }
 }
 
-/** 取配置期间 / 配置不可用时的占位页。 */
+/** 取配置 / 换会话期间，以及桌面未配置时的占位页；始终保留返回按钮。 */
 @Composable
 private fun DesktopNotice(botId: String, text: String, retry: (() -> Unit)?) {
     val store = LocalStore.current
@@ -321,15 +403,18 @@ private fun DesktopNotice(botId: String, text: String, retry: (() -> Unit)?) {
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun DesktopView(botId: String, cfg: DesktopConfig) {
+private fun DesktopView(botId: String, config: DesktopConfig, session: DesktopSession) {
     val store = LocalStore.current
     val ui = LocalUi.current
     val bot = store.bot(botId)
-    val profile = remember(botId) { BotDesktop.profile(botId) }
+    val profile = session.profile
+    val configUrl = remember(config) { desktopConfigUrl(config) }
     val view = LocalView.current
     val holder = remember { arrayOfNulls<WebView>(1) }
     val handler = remember { Handler(Looper.getMainLooper()) }
-    val remoteLog = remember(cfg) { RemoteLog(cfg.bridge, cfg.bridgeKey, profile) }
+    val remoteLog = remember(session) {
+        RemoteLog(session.bridge, session.bridgeKey, profile)
+    }
     val appCtx = LocalContext.current.applicationContext
     val version = remember {
         runCatching {
@@ -337,7 +422,16 @@ private fun DesktopView(botId: String, cfg: DesktopConfig) {
             "ver ${pi.versionName}/${pi.versionCode}"
         }.getOrDefault("ver ?")
     }
-    val probe = remember(cfg) { NetProbe(cfg.bridge, cfg.gateway, cfg.bridgeKey, version) }
+    val probe = remember(session) {
+        NetProbe(session.bridge, session.host, session.bridgeKey, version)
+    }
+    val allowedHosts = remember(session, configUrl) {
+        setOfNotNull(
+            hostOf(session.host),
+            hostOf(session.bridge),
+            hostOf(configUrl),
+        )
+    }
 
     var state by remember { mutableStateOf("连接中…") }
     var control by remember { mutableStateOf(false) }
@@ -357,15 +451,17 @@ private fun DesktopView(botId: String, cfg: DesktopConfig) {
         }, 350)
     }
 
-    val connectJs = remember(cfg) {
+    val connectJs = remember(session) {
         val args = listOf(
-            cfg.gateway,
-            cfg.token,
-            profile,
-            cfg.bridge,
-            cfg.bridgeKey,
-            cfg.configUrl.ifBlank { BotDesktop.CONFIG_URL },
-        ).joinToString(",") { JSONObject.quote(it) }
+            JSONObject.quote(session.host),
+            JSONObject.quote(session.token),
+            JSONObject.quote(profile),
+            JSONObject.quote(session.bridge),
+            JSONObject.quote(session.bridgeKey),
+            JSONObject.quote(configUrl),
+            if (BuildConfig.DEBUG) "true" else "false",
+            JSONObject.quote(session.ticket),
+        ).joinToString(",")
         "window.Flux && window.Flux.connect($args)"
     }
 
@@ -477,10 +573,10 @@ private fun DesktopView(botId: String, cfg: DesktopConfig) {
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
-                        allowFileAccess = true
-                        allowFileAccessFromFileURLs = true
-                        // file:// 页面要 fetch / WebSocket 到 https，Android WebView 必须显式放行
-                        allowUniversalAccessFromFileURLs = true
+                        // 关闭文件系统访问；file:///android_asset 下的本地资源仍可正常加载
+                        allowFileAccess = false
+                        allowFileAccessFromFileURLs = false
+                        allowUniversalAccessFromFileURLs = false
                         mediaPlaybackRequiresUserGesture = false
                         setSupportZoom(false)
                         builtInZoomControls = false
@@ -493,20 +589,39 @@ private fun DesktopView(botId: String, cfg: DesktopConfig) {
                             appCtx,
                             { holder[0] },
                             onUpdate = { text, ctl -> state = text; control = ctl },
-                            onLog = { remoteLog.send("[web] $it") },
+                            onLog = { if (BuildConfig.DEBUG) android.util.Log.d("FluxDesktop", it) },
                             onFullscreen = { fullscreen = it },
                             onLandscape = { landscape = it },
                         ),
                         "FluxHost",
                     )
-                    addJavascriptInterface(NativeHttp(handler) { holder[0] }, "FluxNet")
+                    addJavascriptInterface(
+                        NativeHttp(handler, { holder[0] }, allowedHosts),
+                        "FluxNet",
+                    )
                     webChromeClient = object : WebChromeClient() {
                         override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
-                            remoteLog.send("[console] ${msg.message()} @${msg.lineNumber()}")
+                            if (BuildConfig.DEBUG) {
+                                remoteLog.send("[console] ${msg.message()} @${msg.lineNumber()}")
+                            }
                             return true
                         }
                     }
                     webViewClient = object : WebViewClient() {
+                        override fun onPageStarted(v: WebView, url: String?, favicon: Bitmap?) {
+                            DesktopTrust.trusted =
+                                url?.startsWith("file:///android_asset/desktop/") == true
+                        }
+
+                        override fun shouldOverrideUrlLoading(
+                            v: WebView,
+                            request: WebResourceRequest,
+                        ): Boolean {
+                            // 只允许本地桌面页，任何外部跳转（http/https/intent 等）一律拦截
+                            return !request.url.toString()
+                                .startsWith("file:///android_asset/desktop/")
+                        }
+
                         override fun onPageFinished(v: WebView, url: String) {
                             if (loaded) return
                             loaded = true

@@ -63,9 +63,11 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Bot
 import top.qiuli55.fluxbot.data.Message
+import top.qiuli55.fluxbot.data.PendingDecision
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Route
@@ -103,9 +105,109 @@ fun ChatScreen(botId: String) {
     var input by remember { mutableStateOf("") }
     var typing by remember { mutableStateOf(false) }
     var workingBots by remember { mutableStateOf<List<Bot>>(emptyList()) }
+    var pendingDecision by remember(botId) { mutableStateOf<PendingDecision?>(null) }
+    var approving by remember(botId) { mutableStateOf(false) }
+    var awaitingApproval by remember(botId) { mutableStateOf(false) }
+    var activeTurnId by remember(botId) { mutableStateOf("") }
+    var turnInFlight by remember(botId) { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size) { store.markRead(botId) }
+
+    // 远端 Bot：可见期间持续轮询待批准决策；离开页面后自动取消。
+    suspend fun pollPendingDecisions() {
+        val b = store.bot(botId) ?: return
+        if (!b.remote || b.group || b.id.isBlank()) return
+        try {
+            val list = store.api.listPendingDecisions(b.id, b.chatTaskId)
+            pendingDecision = list.firstOrNull()
+            if (list.isNotEmpty()) awaitingApproval = true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 轮询失败保持安静，不打断正在进行的聊天。
+        }
+    }
+
+    LaunchedEffect(botId, bot.remote) {
+        if (!bot.remote || bot.group) return@LaunchedEffect
+        while (true) {
+            pollPendingDecisions()
+            delay(2000)
+        }
+    }
+
+    // 等这一轮结束；若超时但服务端仍在等用户批准，保留卡片而不是报硬失败。
+    suspend fun waitTurn(turnId: String) {
+        val b = store.bot(botId) ?: return
+        turnInFlight = true
+        store.setWorking(b.id, true)
+        try {
+            val turn = store.api.awaitTurn(b.id, turnId) { status ->
+                if (status == "running") typing = true
+                if (status == "waiting_for_user_decision" || status == "waiting_for_approval") {
+                    typing = false
+                    awaitingApproval = true
+                    ui.scope.launch { pollPendingDecisions() }
+                }
+            }
+            activeTurnId = ""
+            awaitingApproval = false
+            typing = false
+            store.addMessage(botId, "bot", turn.replyText.ifBlank { "模型没有返回内容" })
+            store.markRead(botId)
+            pollPendingDecisions()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val stillPending = try {
+                store.api.listPendingDecisions(b.id, store.bot(botId)?.chatTaskId.orEmpty())
+            } catch (inner: CancellationException) {
+                throw inner
+            } catch (inner: Exception) {
+                emptyList()
+            }
+            if (stillPending.isNotEmpty()) {
+                pendingDecision = stillPending.first()
+                awaitingApproval = true
+                typing = false
+                return
+            }
+            activeTurnId = ""
+            awaitingApproval = false
+            typing = false
+            store.addMessage(botId, "bot", e.message ?: "模型返回异常")
+        } finally {
+            turnInFlight = false
+            typing = false
+            store.setWorking(b.id, false)
+        }
+    }
+
+    fun respondDecision(option: String) {
+        val pending = pendingDecision ?: return
+        if (approving) return
+        approving = true
+        val turnId = activeTurnId
+        ui.scope.launch {
+            try {
+                store.api.chooseDecision(pending.taskId, pending.decisionId, option)
+                pendingDecision = null
+                awaitingApproval = false
+                ui.haptic(8)
+                ui.showToast(if (option == "拒绝") "已拒绝" else "已允许")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ui.showToast(e.message ?: "操作失败")
+                return@launch
+            } finally {
+                approving = false
+            }
+            pollPendingDecisions()
+            if (turnId.isNotBlank() && activeTurnId == turnId && !turnInFlight) waitTurn(turnId)
+        }
+    }
 
     // 远端 Bot：首次进入时拉取这个会话的历史消息。
     LaunchedEffect(botId) {
@@ -159,20 +261,11 @@ fun ChatScreen(botId: String) {
                         store.addMessage(botId, "bot", "发送失败：${e.message ?: "未知错误"}")
                         return@launch
                     }
-                    val turn = try {
-                        store.api.awaitTurn(bot.id, started.id) { status ->
-                            if (status == "running") typing = true
-                        }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        store.addMessage(botId, "bot", e.message ?: "模型返回异常")
-                        return@launch
-                    }
-                    typing = false
-                    val reply = turn.replyText.ifBlank { "模型没有返回内容" }
-                    store.addMessage(botId, "bot", reply)
-                    store.markRead(botId)
+                    activeTurnId = started.id
+                    awaitingApproval = false
+                    // 回合刚开始就立即查一次，别让批准卡片等下一个 2 秒轮询。
+                    pollPendingDecisions()
+                    waitTurn(started.id)
                 } finally {
                     typing = false
                     store.setWorking(botId, false)
@@ -317,6 +410,14 @@ fun ChatScreen(botId: String) {
 
         Column(Modifier.fillMaxWidth()) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
+            pendingDecision?.let { pending ->
+                ApprovalCard(
+                    decision = pending,
+                    busy = approving,
+                    waiting = awaitingApproval,
+                    onChoose = { respondDecision(it) },
+                )
+            }
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -601,6 +702,106 @@ private fun TypingRow() {
                 Box(Modifier.size(6.dp).clip(CircleShape).background(Flux.text3.copy(alpha = a)))
             }
         }
+    }
+}
+
+/** 高风险工具审批卡：只存在于界面上，不写入消息列表。 */
+@Composable
+private fun ApprovalCard(
+    decision: PendingDecision,
+    busy: Boolean,
+    waiting: Boolean,
+    onChoose: (String) -> Unit,
+) {
+    val shape = RoundedCornerShape(18.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 12.dp, top = 10.dp)
+            .clip(shape)
+            .background(Flux.panel2)
+            .border(1.dp, Flux.line, shape)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            FIcon(FIcon.Shield, size = 14.dp, color = Flux.warn)
+            Text(
+                decision.question.ifBlank { "需要你批准" },
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight(560),
+                color = Flux.text,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (decision.detail.isNotBlank()) {
+            Text(
+                decision.detail,
+                fontSize = 12.sp,
+                color = Flux.text3,
+                lineHeight = 18.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        if (waiting) {
+            Text(
+                "等待你的批准",
+                fontSize = 11.sp,
+                color = Flux.text4,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        val labels = decision.options.ifEmpty { listOf("允许", "拒绝") }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            labels.forEach { label ->
+                val primary = label != "拒绝" && (label == "允许" || labels.size == 1)
+                ApprovalButton(
+                    label = label,
+                    primary = primary,
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f),
+                    onClick = { onChoose(label) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApprovalButton(
+    label: String,
+    primary: Boolean,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(14.dp)
+    Box(
+        modifier
+            .height(38.dp)
+            .clip(shape)
+            .background(if (primary) Flux.accent else Flux.panel3)
+            .border(1.dp, if (primary) Flux.accent else Flux.line, shape)
+            .alpha(if (enabled) 1f else 0.4f)
+            .clickable(enabled = enabled) { onClick() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            fontSize = 13.sp,
+            fontWeight = FontWeight(560),
+            color = if (primary) Flux.ink else Flux.text,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

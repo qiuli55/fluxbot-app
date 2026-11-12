@@ -68,6 +68,7 @@ data class Bot(
     val group: Boolean = false,
     val members: List<String> = emptyList(),
     val taskId: String = "",
+    val chatTaskId: String = "",
     val remote: Boolean = false,
     val library: List<LibraryEntry> = emptyList(),
     /** 云端路由模型（空 = 跟随平台默认）；modelKeyId 指向密钥库条目。 */
@@ -181,6 +182,7 @@ fun Bot.toJson() = JSONObject()
     .put("group", group)
     .put("members", JSONArray().apply { addAllStrings(members) })
     .put("taskId", taskId)
+    .put("chatTaskId", chatTaskId)
     .put("remote", remote)
     .put("library", JSONArray().apply { library.forEach { put(it.toJson()) } })
     .put("model", model)
@@ -202,6 +204,7 @@ fun botFromJson(o: JSONObject) = Bot(
     group = o.optBoolean("group", false),
     members = o.optJSONArray("members")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
     taskId = o.optString("taskId").takeUnless { it == "null" }.orEmpty(),
+    chatTaskId = o.optString("chatTaskId").takeUnless { it == "null" }.orEmpty(),
     remote = o.optBoolean("remote", false),
     library = o.optJSONArray("library")
         ?.let { a -> (0 until a.length()).map { libraryFromJson(a.getJSONObject(it)) } }

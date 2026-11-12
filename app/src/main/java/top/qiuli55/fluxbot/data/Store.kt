@@ -147,7 +147,9 @@ class Store(context: Context) {
                         computer = "云端 · flux-bot",
                         messages = emptyList(), memories = emptyList(), routines = emptyList(),
                         permissions = emptyMap(), autoMemory = true,
-                        taskId = r.taskId.takeUnless { it == "null" }.orEmpty(), remote = true,
+                        taskId = r.taskId.takeUnless { it == "null" }.orEmpty(),
+                        chatTaskId = r.chatTaskId.takeUnless { it == "null" }.orEmpty(),
+                        remote = true,
                     )
                 } else {
                     bots.map {
@@ -159,6 +161,8 @@ class Store(context: Context) {
                             taskId = listOf(it.taskId, r.taskId)
                                 .firstOrNull { id -> id.isNotEmpty() && id != "null" }
                                 .orEmpty(),
+                            chatTaskId = r.chatTaskId.takeIf { id -> id.isNotEmpty() && id != "null" }
+                                ?: it.chatTaskId,
                             remote = true,
                         ) else it
                     }
@@ -169,6 +173,26 @@ class Store(context: Context) {
     }
 
     fun setTaskId(botId: String, taskId: String) = updateBot(botId) { it.copy(taskId = taskId) }
+
+    /** 远端 Bot：用后端列表替换本地记忆缓存；取消异常继续向上抛。 */
+    suspend fun refreshBotMemories(botId: String) {
+        val b = bot(botId) ?: return
+        if (!b.remote) return
+        val memories = api.listMemories(botId).map {
+            Memory(it.id, it.text, it.source, it.ts)
+        }
+        updateBot(botId) { it.copy(memories = memories) }
+    }
+
+    /** 远端 Bot：用后端列表替换本地定时任务缓存；本地 Bot 不动。 */
+    suspend fun refreshBotRoutines(botId: String) {
+        val b = bot(botId) ?: return
+        if (!b.remote) return
+        val routines = api.listRoutines(botId).map {
+            Routine(it.id, it.title, it.time, it.freq, it.enabled)
+        }
+        updateBot(botId) { it.copy(routines = routines) }
+    }
 
     fun replaceMessages(botId: String, messages: List<Message>) = updateBot(botId) {
         val last = messages.lastOrNull()

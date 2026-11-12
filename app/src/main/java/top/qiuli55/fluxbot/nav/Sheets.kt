@@ -1410,6 +1410,7 @@ private fun CopyChip(onClick: () -> Unit) {
 private fun MemoryAddSheet(botId: String) {
     val store = LocalStore.current
     val ui = LocalUi.current
+    val bot = store.bot(botId)
     var text by remember { mutableStateOf("") }
     SheetFrame("添加记忆") {
         SheetHint("一条记忆是一句事实或偏好，Bot 之后会一直记得。", top = 0)
@@ -1418,9 +1419,25 @@ private fun MemoryAddSheet(botId: String) {
         SheetHint("记忆跟着账号走，换设备也能用。")
         Spacer(Modifier.height(16.dp))
         PrimaryButton("添加到记忆", enabled = text.isNotBlank()) {
-            store.addMemory(botId, text.trim(), "manual")
-            ui.closeSheet()
-            ui.showToast("已添加到记忆")
+            val content = text.trim()
+            if (bot?.remote == true) {
+                ui.scope.launch {
+                    try {
+                        store.api.addMemory(bot.id, content, kind = "fact", relevance = "direct")
+                        store.refreshBotMemories(bot.id)
+                        ui.closeSheet()
+                        ui.showToast("已添加到记忆")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        ui.showToast(e.message ?: "添加记忆失败")
+                    }
+                }
+            } else {
+                store.addMemory(botId, content, "manual")
+                ui.closeSheet()
+                ui.showToast("已添加到记忆")
+            }
         }
     }
 }
@@ -1429,6 +1446,7 @@ private fun MemoryAddSheet(botId: String) {
 private fun RoutineAddSheet(botId: String) {
     val store = LocalStore.current
     val ui = LocalUi.current
+    val bot = store.bot(botId)
     var title by remember { mutableStateOf("") }
     var time by remember { mutableStateOf("08:30") }
     var freqIndex by remember { mutableStateOf(0) }
@@ -1447,11 +1465,52 @@ private fun RoutineAddSheet(botId: String) {
                 ui.showToast("时间格式像 08:30")
                 return@PrimaryButton
             }
-            store.addRoutine(botId, title.trim(), time.trim(), freqs[freqIndex])
-            ui.closeSheet()
-            ui.showToast("定时任务已创建")
+            val name = title.trim()
+            if (bot?.remote == true) {
+                val cron = cronFor(time.trim(), freqs[freqIndex])
+                if (cron == null) {
+                    ui.showToast("无法识别的时间")
+                    return@PrimaryButton
+                }
+                ui.scope.launch {
+                    try {
+                        store.api.addRoutine(
+                            botId = bot.id,
+                            name = name,
+                            instruction = name,
+                            schedule = cron,
+                            enabled = true,
+                        )
+                        store.refreshBotRoutines(bot.id)
+                        ui.closeSheet()
+                        ui.showToast("定时任务已创建")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        ui.showToast(e.message ?: "创建定时任务失败")
+                    }
+                }
+            } else {
+                store.addRoutine(botId, name, time.trim(), freqs[freqIndex])
+                ui.closeSheet()
+                ui.showToast("定时任务已创建")
+            }
         }
     }
+}
+
+/** 把「08:30 + 每天/工作日/每周一」换算成 5 段 cron；无法识别时返回 null。 */
+private fun cronFor(time: String, freq: String): String? {
+    val match = Regex("^([01]\\d|2[0-3]):([0-5]\\d)$").matchEntire(time.trim()) ?: return null
+    val hour = match.groupValues[1].toInt()
+    val minute = match.groupValues[2].toInt()
+    val dow = when (freq) {
+        "每天" -> "*"
+        "工作日" -> "1-5"
+        "每周一" -> "1"
+        else -> return null
+    }
+    return "$minute $hour * * $dow"
 }
 
 @Composable
@@ -1734,11 +1793,27 @@ private fun MessageMenuSheet(botId: String, msgId: String, text: String) {
 private fun MemoryMenuSheet(botId: String, memId: String) {
     val store = LocalStore.current
     val ui = LocalUi.current
+    val bot = store.bot(botId)
     SheetFrame("记忆") {
         MenuItem("删除这条记忆", danger = true) {
-            store.deleteMemory(botId, memId)
-            ui.closeSheet()
-            ui.showToast("已删除这条记忆")
+            if (bot?.remote == true) {
+                ui.scope.launch {
+                    try {
+                        store.api.deleteMemory(bot.id, memId)
+                        store.refreshBotMemories(bot.id)
+                        ui.closeSheet()
+                        ui.showToast("已删除这条记忆")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        ui.showToast(e.message ?: "删除记忆失败")
+                    }
+                }
+            } else {
+                store.deleteMemory(botId, memId)
+                ui.closeSheet()
+                ui.showToast("已删除这条记忆")
+            }
         }
     }
 }

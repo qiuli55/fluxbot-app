@@ -51,6 +51,43 @@ data class ModelCatalog(
     val options: List<RemoteModel>,
 )
 
+/** 一条等待用户批准的任务决策（高风险工具会使用「允许 / 拒绝」）。 */
+data class PendingDecision(
+    val taskId: String,
+    val decisionId: String,
+    val question: String,
+    val detail: String,
+    val options: List<String>,
+    val kind: String,
+)
+
+/** 远端 Bot 的一条长期记忆。 */
+data class RemoteMemory(
+    val id: String,
+    val text: String,
+    val source: String,
+    val ts: String,
+)
+
+/** 远端 Bot 的一条定时任务。 */
+data class RemoteRoutine(
+    val id: String,
+    val title: String,
+    val time: String,
+    val freq: String,
+    val enabled: Boolean,
+)
+
+/** 一次任务的运行记录（用于 Bot 页的运行历史）。 */
+data class RemoteTask(
+    val id: String,
+    val status: String,
+    val title: String,
+    val createdAt: String,
+    val finishedAt: String,
+    val error: String,
+)
+
 /** 后端签发的一次云桌面会话；profile 由服务端计算，客户端直接使用。 */
 data class DesktopSession(
     val host: String,
@@ -505,6 +542,152 @@ class Api(context: Context) {
             }
         }
 
+    // ---------- 审批（任务决策） ----------
+
+    /**
+     * 列出这个 Bot 正在等待用户批准的决策。
+     *
+     * 先查所有 waiting_for_user_decision 的任务；如果已知 chatTaskId 且它不在列表里，
+     * 再单独取一次 /tasks/{chatTaskId}，避免聊天任务因分页 / 过滤条件被漏掉。
+     */
+    suspend fun listPendingDecisions(
+        botId: String,
+        chatTaskId: String = "",
+    ): List<PendingDecision> = withContext(Dispatchers.IO) {
+        val found = LinkedHashMap<String, PendingDecision>()
+        val tasks = request(
+            "GET",
+            "/api/v1/bots/$botId/tasks?status=waiting_for_user_decision",
+            null,
+        ).dataArray()
+        for (i in 0 until tasks.length()) {
+            val task = tasks.optJSONObject(i) ?: continue
+            val taskId = task.optStringOrEmpty("id")
+            if (taskId.isEmpty()) continue
+            val pending = task.optJSONObject("pending_decision") ?: continue
+            parsePendingDecision(taskId, pending)?.let { found[it.decisionId] = it }
+        }
+        val chatId = chatTaskId.trim().takeUnless { it == "null" }.orEmpty()
+        if (chatId.isNotEmpty() && found.values.none { it.taskId == chatId }) {
+            getTaskPending(chatId)?.let { found[it.decisionId] = it }
+        }
+        found.values.toList()
+    }
+
+    /** 单独读取一个任务的待批准决策；没有则返回 null。 */
+    suspend fun getTaskPending(taskId: String): PendingDecision? = withContext(Dispatchers.IO) {
+        val root = request("GET", "/api/v1/tasks/$taskId", null)
+        val data = root.optJSONObject("data") ?: root
+        val pending = data.optJSONObject("pending_decision") ?: return@withContext null
+        parsePendingDecision(taskId, pending)
+    }
+
+    /**
+     * 选择某个决策选项。
+     *
+     * 允许：action=choose, option="允许"；拒绝：action=choose, option="拒绝"。
+     * 不使用 action=reject（它表示拒绝全部选项，语义不同）。
+     */
+    suspend fun chooseDecision(
+        taskId: String,
+        decisionId: String,
+        option: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("decision_id", decisionId)
+            .put("action", "choose")
+            .put("option", option)
+        request("POST", "/api/v1/tasks/$taskId/decisions/choose", body)
+        Unit
+    }
+
+    // ---------- 记忆 / 定时任务 / 运行记录 ----------
+
+    suspend fun listMemories(botId: String): List<RemoteMemory> = withContext(Dispatchers.IO) {
+        val data = request("GET", "/api/v1/bots/$botId/memories", null).dataArray()
+        (0 until data.length()).mapNotNull { i ->
+            data.optJSONObject(i)?.let(::parseMemory)
+        }
+    }
+
+    suspend fun addMemory(
+        botId: String,
+        content: String,
+        kind: String = "fact",
+        relevance: String = "direct",
+    ): Unit = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("content", content)
+            .put("kind", kind)
+            .put("relevance", relevance)
+        request("POST", "/api/v1/bots/$botId/memories", body)
+        Unit
+    }
+
+    suspend fun deleteMemory(botId: String, memoryId: String): Unit =
+        withContext(Dispatchers.IO) {
+            request("DELETE", "/api/v1/bots/$botId/memories/$memoryId", null)
+            Unit
+        }
+
+    suspend fun listRoutines(botId: String): List<RemoteRoutine> = withContext(Dispatchers.IO) {
+        val data = request("GET", "/api/v1/bots/$botId/routines", null).dataArray()
+        (0 until data.length()).mapNotNull { i ->
+            data.optJSONObject(i)?.let(::parseRoutine)
+        }
+    }
+
+    suspend fun addRoutine(
+        botId: String,
+        name: String,
+        instruction: String? = null,
+        schedule: String? = null,
+        enabled: Boolean = true,
+    ): Unit = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("name", name)
+            .put("enabled", enabled)
+        if (!instruction.isNullOrBlank()) body.put("instruction", instruction)
+        if (!schedule.isNullOrBlank()) body.put("schedule", schedule)
+        request("POST", "/api/v1/bots/$botId/routines", body)
+        Unit
+    }
+
+    /**
+     * 更新定时任务，优先用 PATCH（后端目前没有等价的 POST 更新入口）。
+     *
+     * Android 上 HttpURLConnection 对 PATCH 的支持并不总是可靠；这里不伪造一个
+     * 不存在的 POST 接口，方法被拒时会原样抛出，由界面 toast 提示。
+     */
+    suspend fun updateRoutine(
+        botId: String,
+        routineId: String,
+        enabled: Boolean? = null,
+        schedule: String? = null,
+        name: String? = null,
+    ): Unit = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+        if (enabled != null) body.put("enabled", enabled)
+        if (!schedule.isNullOrBlank()) body.put("schedule", schedule)
+        if (!name.isNullOrBlank()) body.put("name", name)
+        request("PATCH", "/api/v1/bots/$botId/routines/$routineId", body)
+        Unit
+    }
+
+    suspend fun deleteRoutine(botId: String, routineId: String): Unit =
+        withContext(Dispatchers.IO) {
+            request("DELETE", "/api/v1/bots/$botId/routines/$routineId", null)
+            Unit
+        }
+
+    suspend fun listTasks(botId: String, limit: Int = 50): List<RemoteTask> =
+        withContext(Dispatchers.IO) {
+            val data = request("GET", "/api/v1/bots/$botId/tasks?limit=$limit", null).dataArray()
+            (0 until data.length()).mapNotNull { i ->
+                data.optJSONObject(i)?.let(::parseTask)
+            }
+        }
+
     private fun parseTurn(o: JSONObject) = RemoteTurn(
         id = o.optStringOrEmpty("id"),
         status = o.optStringOrEmpty("status"),
@@ -611,6 +794,100 @@ class Api(context: Context) {
         taskId = o.optStringOrEmpty("last_task_id").takeUnless { it == "null" }.orEmpty(),
         chatTaskId = o.optStringOrEmpty("chat_task_id").takeUnless { it == "null" }.orEmpty(),
     )
+
+    /** 后端列表接口通常把数组放在 data 里；也兼容 data 对象内再包一层。 */
+    private fun JSONObject.dataArray(): JSONArray {
+        optJSONArray("data")?.let { return it }
+        val obj = optJSONObject("data") ?: return JSONArray()
+        return obj.optJSONArray("tasks")
+            ?: obj.optJSONArray("items")
+            ?: obj.optJSONArray("memories")
+            ?: obj.optJSONArray("routines")
+            ?: JSONArray()
+    }
+
+    private fun parsePendingDecision(taskId: String, o: JSONObject): PendingDecision? {
+        val id = o.optStringOrEmpty("id")
+        if (id.isEmpty()) return null
+        val options = o.optJSONArray("options")?.let { array ->
+            (0 until array.length()).mapNotNull { index ->
+                when (val item = array.opt(index)) {
+                    is JSONObject -> item.optStringOrEmpty("label")
+                        .ifBlank { item.optStringOrEmpty("option") }
+                        .takeIf { it.isNotBlank() }
+                    is String -> item.takeIf { it.isNotBlank() }
+                    else -> null
+                }
+            }
+        }.orEmpty()
+        return PendingDecision(
+            taskId = taskId,
+            decisionId = id,
+            question = o.optStringOrEmpty("question").ifBlank { "需要你批准" },
+            detail = o.optStringOrEmpty("context"),
+            options = options,
+            kind = o.optStringOrEmpty("kind"),
+        )
+    }
+
+    private fun parseMemory(o: JSONObject): RemoteMemory? {
+        val id = o.optStringOrEmpty("id")
+        val text = o.optStringOrEmpty("content").ifBlank { o.optStringOrEmpty("text") }
+        if (id.isEmpty() || text.isEmpty()) return null
+        return RemoteMemory(
+            id = id,
+            text = text,
+            source = o.optStringOrEmpty("source").ifBlank { o.optStringOrEmpty("kind") },
+            ts = displayTime(
+                o.optStringOrEmpty("created_at").ifBlank { o.optStringOrEmpty("createdAt") },
+            ),
+        )
+    }
+
+    private fun parseRoutine(o: JSONObject): RemoteRoutine? {
+        val id = o.optStringOrEmpty("id")
+        if (id.isEmpty()) return null
+        val schedule = o.optStringOrEmpty("schedule")
+        return RemoteRoutine(
+            id = id,
+            title = o.optStringOrEmpty("name")
+                .ifBlank { o.optStringOrEmpty("title") }
+                .ifBlank { "定时任务" },
+            time = schedule.ifBlank { o.optStringOrEmpty("next_run_at") },
+            freq = schedule.ifBlank { "定时" },
+            enabled = o.optBoolean("enabled", true),
+        )
+    }
+
+    private fun parseTask(o: JSONObject): RemoteTask? {
+        val id = o.optStringOrEmpty("id")
+        if (id.isEmpty()) return null
+        val title = o.optStringOrEmpty("title")
+            .ifBlank { o.optStringOrEmpty("instruction") }
+            .ifBlank { o.optStringOrEmpty("prompt") }
+            .ifBlank { o.optStringOrEmpty("description") }
+        return RemoteTask(
+            id = id,
+            status = o.optStringOrEmpty("status"),
+            title = title.ifBlank { "任务" },
+            createdAt = displayTime(
+                o.optStringOrEmpty("created_at").ifBlank { o.optStringOrEmpty("createdAt") },
+            ),
+            finishedAt = displayTime(
+                o.optStringOrEmpty("finished_at").ifBlank {
+                    o.optStringOrEmpty("ended_at").ifBlank {
+                        o.optStringOrEmpty("finishedAt")
+                    }
+                },
+            ),
+            error = o.optStringOrEmpty("error"),
+        )
+    }
+
+    private fun displayTime(raw: String): String {
+        if (raw.isBlank()) return ""
+        return raw.replace('T', ' ').removeSuffix("Z").take(16)
+    }
 
     companion object {
         /** 未登录 / 未绑定账号时使用的全局令牌。 */

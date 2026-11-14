@@ -55,6 +55,19 @@ class ImageStackTest {
     }
 
     @Test
+    fun uploadIdImagesStackTheSameWay() {
+        val one = stackedImages(listOf(uploadImage(0)))
+        assertNull(one)
+        val two = stackedImages(listOf(uploadImage(0), uploadImage(1)))
+        assertNotNull(two)
+        assertEquals(2, two!!.size)
+        assertEquals("u-1", two[1].uploadId)
+    }
+
+    private fun uploadImage(index: Int) =
+        ComponentNode.Image(uploadId = "u-$index", alt = "上传截图 $index")
+
+    @Test
     fun countLabelUsesChinese() {
         assertEquals("2 张图片", imageCountLabel(2))
         assertEquals("4 张图片", imageCountLabel(4))

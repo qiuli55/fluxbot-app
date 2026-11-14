@@ -4,6 +4,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -46,8 +47,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -58,6 +61,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.ComponentNode
+import top.qiuli55.fluxbot.data.mediaRef
 import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
 import kotlin.math.roundToInt
@@ -305,7 +309,18 @@ internal fun PhotoPlaceholder(
 ) {
     val style = PhotoStyles[((index % PhotoStyles.size) + PhotoStyles.size) % PhotoStyles.size]
     val label = image.alt.ifBlank { "示例照片 ${index + 1}" }
+    val ref = remember(image) { image.mediaRef() }
+    val bitmap = rememberMediaBitmap(ref)
     Box(modifier) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = label,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            MediaScrim(Color(0xCC02060A))
+        } else {
         Canvas(Modifier.fillMaxSize()) {
             val w = size.width
             val h = size.height
@@ -432,6 +447,7 @@ internal fun PhotoPlaceholder(
                 .background(style.accent.copy(alpha = 0.88f))
                 .padding(horizontal = 6.dp, vertical = 2.dp),
         )
+        }
         Text(
             label,
             fontSize = 12.sp,

@@ -30,6 +30,7 @@ sealed interface ComponentNode {
     data class Image(
         val url: String = "",
         val deliveryId: String = "",
+        val uploadId: String = "",
         val alt: String = "",
         val mime: String = "",
         val width: Int = 0,
@@ -41,6 +42,7 @@ sealed interface ComponentNode {
         val name: String,
         val url: String = "",
         val deliveryId: String = "",
+        val uploadId: String = "",
         val mime: String = "",
         val size: Long = -1,
         val index: Int = -1,
@@ -49,6 +51,7 @@ sealed interface ComponentNode {
     data class Audio(
         val url: String = "",
         val deliveryId: String = "",
+        val uploadId: String = "",
         val durationMs: Long = -1,
         val transcript: String = "",
         val index: Int = -1,
@@ -151,6 +154,7 @@ fun parseComponentNode(raw: JSONObject?): ComponentNode? {
             "image" -> ComponentNode.Image(
                 url = raw.optString("url").trim(),
                 deliveryId = raw.optString("delivery_id").trim(),
+                uploadId = raw.optString("upload_id").trim(),
                 alt = raw.optString("alt").trim(),
                 mime = raw.optString("mime").trim(),
                 width = raw.optInt("width", 0),
@@ -165,6 +169,7 @@ fun parseComponentNode(raw: JSONObject?): ComponentNode? {
                     name = name,
                     url = raw.optString("url").trim(),
                     deliveryId = raw.optString("delivery_id").trim(),
+                    uploadId = raw.optString("upload_id").trim(),
                     mime = raw.optString("mime").trim(),
                     size = raw.optLong("size", -1L),
                     index = raw.optInt("index", -1),
@@ -174,6 +179,7 @@ fun parseComponentNode(raw: JSONObject?): ComponentNode? {
             "audio" -> ComponentNode.Audio(
                 url = raw.optString("url").trim(),
                 deliveryId = raw.optString("delivery_id").trim(),
+                uploadId = raw.optString("upload_id").trim(),
                 durationMs = raw.optLong("duration_ms", -1L),
                 transcript = raw.optString("transcript").trim(),
                 index = raw.optInt("index", -1),
@@ -281,6 +287,7 @@ fun ComponentNode.toJson(): JSONObject = when (this) {
     is ComponentNode.Image -> JSONObject().put("type", "image").apply {
         if (url.isNotEmpty()) put("url", url)
         if (deliveryId.isNotEmpty()) put("delivery_id", deliveryId)
+        if (uploadId.isNotEmpty()) put("upload_id", uploadId)
         if (alt.isNotEmpty()) put("alt", alt)
         if (mime.isNotEmpty()) put("mime", mime)
         if (width > 0) put("width", width)
@@ -291,6 +298,7 @@ fun ComponentNode.toJson(): JSONObject = when (this) {
     is ComponentNode.File -> JSONObject().put("type", "file").put("name", name).apply {
         if (url.isNotEmpty()) put("url", url)
         if (deliveryId.isNotEmpty()) put("delivery_id", deliveryId)
+        if (uploadId.isNotEmpty()) put("upload_id", uploadId)
         if (mime.isNotEmpty()) put("mime", mime)
         if (size >= 0) put("size", size)
         if (index >= 0) put("index", index)
@@ -299,6 +307,7 @@ fun ComponentNode.toJson(): JSONObject = when (this) {
     is ComponentNode.Audio -> JSONObject().put("type", "audio").apply {
         if (url.isNotEmpty()) put("url", url)
         if (deliveryId.isNotEmpty()) put("delivery_id", deliveryId)
+        if (uploadId.isNotEmpty()) put("upload_id", uploadId)
         if (durationMs >= 0) put("duration_ms", durationMs)
         if (transcript.isNotEmpty()) put("transcript", transcript)
         if (index >= 0) put("index", index)

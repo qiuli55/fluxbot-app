@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 只暴露应用缓存里的附件目录，供系统应用打开 / 分享。 -->
+<paths>
+    <cache-path name="media" path="media/" />
+</paths>

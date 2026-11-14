@@ -37,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,6 +45,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import top.qiuli55.fluxbot.data.MediaLoader
 import top.qiuli55.fluxbot.data.Store
 import top.qiuli55.fluxbot.screens.AccountScreen
 import top.qiuli55.fluxbot.screens.ApprovalRulesScreen
@@ -55,6 +57,7 @@ import top.qiuli55.fluxbot.screens.CreateScreen
 import top.qiuli55.fluxbot.screens.DesktopScreen
 import top.qiuli55.fluxbot.screens.HomeScreen
 import top.qiuli55.fluxbot.screens.LibraryScreen
+import top.qiuli55.fluxbot.screens.LocalMediaLoader
 import top.qiuli55.fluxbot.screens.MemoryScreen
 import top.qiuli55.fluxbot.screens.SettingsScreen
 import top.qiuli55.fluxbot.screens.VaultScreen
@@ -146,6 +149,11 @@ class AppUi(val store: Store) {
 fun FluxApp(store: Store) {
     val ui = remember { AppUi(store) }
     val view = LocalView.current
+    val context = LocalContext.current
+    // 鉴权媒体加载器只在真实 App 里注入；截图脚手架不提供，因而不会联网。
+    val mediaLoader = remember(store, context) {
+        MediaLoader(context.applicationContext, store.api)
+    }
     SideEffect {
         ui.onHaptic = { view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
     }
@@ -173,7 +181,11 @@ fun FluxApp(store: Store) {
         }
     }
 
-    CompositionLocalProvider(LocalUi provides ui, LocalStore provides store) {
+    CompositionLocalProvider(
+        LocalUi provides ui,
+        LocalStore provides store,
+        LocalMediaLoader provides mediaLoader,
+    ) {
         Box(
             Modifier.fillMaxSize().background(Color(0xFF020304)),
             contentAlignment = Alignment.Center,

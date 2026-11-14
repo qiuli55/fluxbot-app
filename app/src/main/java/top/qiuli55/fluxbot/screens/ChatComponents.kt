@@ -1,8 +1,10 @@
 package top.qiuli55.fluxbot.screens
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +22,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,7 +32,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -40,17 +46,21 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.ComponentAction
 import top.qiuli55.fluxbot.data.ComponentNode
+import top.qiuli55.fluxbot.data.MediaRef
+import top.qiuli55.fluxbot.data.mediaRef
 import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
 
 /**
  * 生成式组件渲染器（schema_version = 1）。
  *
- * 所有节点都只使用 App 现有设计令牌与 Compose 原语绘制，不加载网络图片：
- * image / audio 在 JVM 截图和离线场景下都能画出稳定的占位预览，不会出现
- * 空白洞或崩溃。未知节点由解析层提前过滤，消息层再退回纯文本。
+ * image / file / audio 的来源由服务端三选一给出：https url、delivery_id+index
+ * 或 upload_id。带鉴权的引用通过 [LocalMediaLoader] 注入的加载器读取；
+ * 截图 / 离线 / 尚无令牌时加载器为空，继续显示原有本地占位图，不会出现
+ * 空白洞、网络请求或崩溃。未知节点由解析层提前过滤，消息层再退回纯文本。
  */
 
 private val BodyColor = Color(0xFFDBE2DF)
@@ -229,6 +239,8 @@ private fun ImageBubble(node: ComponentNode.Image) {
     } else {
         16f / 10f
     }
+    val ref = remember(node) { node.mediaRef() }
+    val bitmap = rememberMediaBitmap(ref)
     Box(
         Modifier
             .fillMaxWidth()
@@ -237,6 +249,15 @@ private fun ImageBubble(node: ComponentNode.Image) {
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xFF0E1C20)),
     ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = node.alt.ifBlank { "图片" },
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            MediaScrim(Color(0xCC04100E))
+        } else {
         Canvas(Modifier.fillMaxSize()) {
             val w = size.width
             val h = size.height
@@ -287,6 +308,7 @@ private fun ImageBubble(node: ComponentNode.Image) {
                 ),
             )
         }
+        }
         Text(
             node.alt.ifBlank { "图片" },
             fontSize = 12.sp,
@@ -315,12 +337,27 @@ private fun ImageBubble(node: ComponentNode.Image) {
 
 @Composable
 private fun FileBubble(node: ComponentNode.File) {
+    val ref = remember(node) { node.mediaRef() }
+    val loader = LocalMediaLoader.current
+    val scope = rememberCoroutineScope()
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(Flux.panel)
             .border(1.dp, Flux.lineSoft, RoundedCornerShape(12.dp))
+            .clickable(enabled = ref != null && loader != null) {
+                val target = ref ?: return@clickable
+                val media = loader ?: return@clickable
+                scope.launch {
+                    val opened = when (target) {
+                        is MediaRef.Remote -> media.openRemoteUrl(target.url, node.mime)
+                        else -> media.fetchFile(target, node.name, node.mime)
+                            ?.let { media.openFile(it.file, it.mime) } ?: false
+                    }
+                    if (!opened) media.notifyOpenFailed()
+                }
+            }
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -384,6 +421,9 @@ internal fun formatBytes(bytes: Long): String = when {
 
 @Composable
 private fun AudioBubble(node: ComponentNode.Audio) {
+    val ref = remember(node) { node.mediaRef() }
+    val loader = LocalMediaLoader.current
+    val scope = rememberCoroutineScope()
     Column(
         Modifier
             .fillMaxWidth()
@@ -394,7 +434,25 @@ private fun AudioBubble(node: ComponentNode.Audio) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
-                Modifier.size(32.dp).clip(CircleShape).background(Flux.accent),
+                Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(Flux.accent)
+                    .clickable(enabled = ref != null && loader != null) {
+                        val target = ref ?: return@clickable
+                        val media = loader ?: return@clickable
+                        scope.launch {
+                            val opened = when (target) {
+                                is MediaRef.Remote -> media.openRemoteUrl(target.url, "audio/*")
+                                else -> media.fetchFile(
+                                    target,
+                                    suggestedName = "voice-${node.index.coerceAtLeast(0)}",
+                                )?.let { media.openFile(it.file, it.mime.ifBlank { "audio/*" }) }
+                                    ?: false
+                            }
+                            if (!opened) media.notifyOpenFailed()
+                        }
+                    },
                 contentAlignment = Alignment.Center,
             ) {
                 Canvas(Modifier.size(12.dp)) {

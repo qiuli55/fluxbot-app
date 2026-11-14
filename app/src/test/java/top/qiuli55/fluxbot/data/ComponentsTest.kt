@@ -78,6 +78,42 @@ class ComponentsTest {
     }
 
     @Test
+    fun parsesUploadIdOnMediaNodes() {
+        val parsed = parseComponentEnvelope(
+            envelope(
+                JSONObject().put("type", "card").put(
+                    "children",
+                    JSONArray()
+                        .put(JSONObject().put("type", "image").put("upload_id", "img_1").put("alt", "截图"))
+                        .put(
+                            JSONObject().put("type", "file").put("name", "报告.pdf")
+                                .put("upload_id", "file_1").put("mime", "application/pdf").put("size", 10),
+                        )
+                        .put(
+                            JSONObject().put("type", "audio").put("upload_id", "voice_1")
+                                .put("duration_ms", 1200),
+                        ),
+                ),
+            ),
+        )!!
+        val card = parsed.root as ComponentNode.Card
+        assertEquals("img_1", (card.children[0] as ComponentNode.Image).uploadId)
+        assertEquals("file_1", (card.children[1] as ComponentNode.File).uploadId)
+        assertEquals("voice_1", (card.children[2] as ComponentNode.Audio).uploadId)
+    }
+
+    @Test
+    fun uploadIdSurvivesJsonRoundTrip() {
+        val image = ComponentNode.Image(uploadId = "img_1", alt = "截图")
+        val file = ComponentNode.File(name = "a.pdf", uploadId = "file_1")
+        val audio = ComponentNode.Audio(uploadId = "voice_1")
+
+        assertEquals("img_1", (parseComponentNode(image.toJson()) as ComponentNode.Image).uploadId)
+        assertEquals("file_1", (parseComponentNode(file.toJson()) as ComponentNode.File).uploadId)
+        assertEquals("voice_1", (parseComponentNode(audio.toJson()) as ComponentNode.Audio).uploadId)
+    }
+
+    @Test
     fun statusAliasNormalizesToProgress() {
         val parsed = parseComponentEnvelope(
             envelope(

@@ -1,5 +1,7 @@
 package top.qiuli55.fluxbot.screens
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -39,12 +41,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,7 +59,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,6 +73,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Bot
+import top.qiuli55.fluxbot.data.ComponentAction
 import top.qiuli55.fluxbot.data.Message
 import top.qiuli55.fluxbot.data.PendingDecision
 import top.qiuli55.fluxbot.nav.LocalStore
@@ -74,6 +82,7 @@ import top.qiuli55.fluxbot.nav.Route
 import top.qiuli55.fluxbot.nav.Sheet
 import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
+import top.qiuli55.fluxbot.ui.FluxTheme
 import top.qiuli55.fluxbot.ui.IconBtn
 import top.qiuli55.fluxbot.ui.PageHead
 import java.util.UUID
@@ -111,6 +120,7 @@ fun ChatScreen(botId: String) {
     var activeTurnId by remember(botId) { mutableStateOf("") }
     var turnInFlight by remember(botId) { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val context = LocalContext.current
 
     LaunchedEffect(messages.size) { store.markRead(botId) }
 
@@ -209,6 +219,27 @@ fun ChatScreen(botId: String) {
         }
     }
 
+    /** 组件按钮：客户端动作就地处理，服务端动作交给当前决策流程。 */
+    fun handleComponentAction(action: ComponentAction) {
+        when {
+            action.type == "client" && action.name == "open_desktop" -> {
+                ui.push(Route.BotDesktop(botId))
+            }
+            action.type == "client" && action.name == "open_url" && action.url.isNotBlank() -> {
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(action.url)))
+                }.onFailure { ui.showToast("无法打开链接") }
+            }
+            action.type == "server" && action.decisionId.isNotBlank() -> {
+                val option = action.option.ifBlank { "允许" }
+                respondDecision(option)
+            }
+            action.type == "server" -> {
+                ui.showToast("已提交：${action.name}")
+            }
+        }
+    }
+
     // 远端 Bot：首次进入时拉取这个会话的历史消息。
     LaunchedEffect(botId) {
         val b = store.bot(botId) ?: return@LaunchedEffect
@@ -222,12 +253,15 @@ fun ChatScreen(botId: String) {
         }
         if (list.isEmpty()) return@LaunchedEffect
         val now = store.clock()
-        val history = list.mapIndexed { i, (role, content) ->
+        val history = list.mapIndexed { i, remote ->
             Message(
                 id = "h-$botId-$i",
-                role = if (role == "assistant") "bot" else "user",
-                text = content,
+                role = if (remote.role == "assistant") "bot" else "user",
+                text = remote.displayText(),
                 time = now,
+                component = remote.component,
+                kind = remote.kind,
+                fallbackText = remote.fallbackText,
             )
         }
         store.replaceMessages(botId, history)
@@ -368,9 +402,12 @@ fun ChatScreen(botId: String) {
     }
 
     Column(Modifier.fillMaxSize().background(Flux.bg).imePadding()) {
-        ChatHead(bot) {
-            if (bot.group) ui.sheet = Sheet.GroupMembers(botId) else ui.push(Route.BotDetail(botId))
-        }
+        ChatHead(
+            bot = bot,
+            onOpen = {
+                if (bot.group) ui.sheet = Sheet.GroupMembers(botId) else ui.push(Route.BotDetail(botId))
+            },
+        )
 
         val groupMembers = if (bot.group) store.groupMembers(bot) else emptyList()
 
@@ -396,9 +433,12 @@ fun ChatScreen(botId: String) {
                 }
             }
             items(messages, key = { it.id }) { msg ->
-                MessageRow(msg, groupMembers.firstOrNull { it.name == msg.sender }) {
-                    ui.sheet = Sheet.MessageMenu(botId, msg.id, msg.text)
-                }
+                MessageRow(
+                    msg = msg,
+                    senderBot = groupMembers.firstOrNull { it.name == msg.sender },
+                    onLongPress = { ui.sheet = Sheet.MessageMenu(botId, msg.id, msg.displayText()) },
+                    onComponentAction = ::handleComponentAction,
+                )
             }
             if (typing) {
                 item(key = "typing") { TypingRow() }
@@ -418,100 +458,128 @@ fun ChatScreen(botId: String) {
                     onChoose = { respondDecision(it) },
                 )
             }
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                CHIPS.forEach { chip ->
-                    Text(
-                        chip,
-                        fontSize = 12.sp,
-                        color = Flux.text2,
-                        modifier = Modifier
-                            .height(30.dp)
-                            .clip(RoundedCornerShape(15.dp))
-                            .background(Color(0xFF0C0F12))
-                            .border(1.dp, Flux.line, RoundedCornerShape(15.dp))
-                            .clickable { submit(chip) }
-                            .padding(horizontal = 13.dp, vertical = 7.dp),
-                    )
-                }
-            }
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(9.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                RoundPlus { ui.sheet = Sheet.Attach(botId) }
-                Row(
-                    Modifier
-                        .weight(1f)
-                        .heightIn(min = 40.dp, max = 120.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(DockBg)
-                        .border(1.dp, Flux.line, RoundedCornerShape(20.dp))
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                ) {
-                    Box(Modifier.weight(1f)) {
-                        if (input.isEmpty()) {
-                            Text(
-                                if (bot.group) "在群里发消息" else "发消息给 ${bot.name}",
-                                fontSize = 14.sp,
-                                color = Flux.text4,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        BasicTextField(
-                            value = input,
-                            onValueChange = { input = it },
-                            textStyle = TextStyle(fontSize = 14.sp, color = Flux.text, lineHeight = 20.sp),
-                            cursorBrush = SolidColor(Flux.accent),
-                            maxLines = 5,
-                            keyboardOptions = KeyboardOptions(
-                                capitalization = KeyboardCapitalization.Sentences,
-                            ),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                }
-                val canSend = input.trim().isNotEmpty()
-                Box(
-                    Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(if (canSend) Flux.accent else Flux.accent)
-                        .alpha(if (canSend) 1f else 0.35f)
-                        .clickable(enabled = canSend) { submit(input) },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    FIcon(FIcon.Send, size = 18.dp, color = Flux.ink)
-                }
-            }
+            ChatChips { submit(it) }
+            ChatComposer(
+                hint = if (bot.group) "在群里发消息" else "发消息给 ${bot.name}",
+                input = input,
+                onInputChange = { input = it },
+                onSend = { submit(input) },
+                onAttach = { ui.sheet = Sheet.Attach(botId) },
+            )
         }
     }
 }
 
 @Composable
-private fun ChatHead(bot: Bot, onOpen: () -> Unit) {
-    val ui = LocalUi.current
+internal fun ChatChips(onPick: (String) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        CHIPS.forEach { chip ->
+            Text(
+                chip,
+                fontSize = 12.sp,
+                color = Flux.text2,
+                modifier = Modifier
+                    .height(30.dp)
+                    .clip(RoundedCornerShape(15.dp))
+                    .background(Color(0xFF0C0F12))
+                    .border(1.dp, Flux.line, RoundedCornerShape(15.dp))
+                    .clickable { onPick(chip) }
+                    .padding(horizontal = 13.dp, vertical = 7.dp),
+            )
+        }
+    }
+}
+
+@Composable
+internal fun ChatComposer(
+    hint: String,
+    input: String,
+    onInputChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onAttach: () -> Unit,
+) {
+    val canSend = input.trim().isNotEmpty()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        RoundPlus(onAttach)
+        Row(
+            Modifier
+                .weight(1f)
+                .heightIn(min = 40.dp, max = 120.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(DockBg)
+                .border(1.dp, Flux.line, RoundedCornerShape(20.dp))
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+        ) {
+            Box(Modifier.weight(1f)) {
+                if (input.isEmpty()) {
+                    Text(
+                        hint,
+                        fontSize = 14.sp,
+                        color = Flux.text4,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                BasicTextField(
+                    value = input,
+                    onValueChange = onInputChange,
+                    textStyle = TextStyle(fontSize = 14.sp, color = Flux.text, lineHeight = 20.sp),
+                    cursorBrush = SolidColor(Flux.accent),
+                    maxLines = 5,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Sentences,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+        Box(
+            Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(Flux.accent)
+                .alpha(if (canSend) 1f else 0.35f)
+                .clickable(enabled = canSend) { onSend() },
+            contentAlignment = Alignment.Center,
+        ) {
+            FIcon(FIcon.Send, size = 18.dp, color = Flux.ink)
+        }
+    }
+}
+
+@Composable
+private fun ChatHead(
+    bot: Bot,
+    onOpen: () -> Unit,
+    /** 截图快照关闭交互与动画；生产路径保持默认值。 */
+    interactive: Boolean = true,
+    subtitleOverride: String? = null,
+) {
+    val ui = if (interactive) LocalUi.current else null
     Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 7.dp, bottom = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            IconBtn(FIcon.Back, onClick = { ui.back() })
+            IconBtn(FIcon.Back, onClick = { ui?.back() })
             Row(
                 Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).clickable { onOpen() },                verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                BotAvatar(bot, 34.dp, animated = true)
+                BotAvatar(bot, 34.dp, animated = interactive)
                 Column {
                     Text(
                         bot.name,
@@ -528,8 +596,11 @@ private fun ChatHead(bot: Bot, onOpen: () -> Unit) {
                     ) {
                         OnlineDot(5.dp)
                         Text(
-                            if (bot.group) "${LocalStore.current.groupMembers(bot).size} 个成员 · 群聊"
-                            else "在线 · ${bot.computer}",
+                            subtitleOverride ?: if (bot.group) {
+                                "${LocalStore.current.groupMembers(bot).size} 个成员 · 群聊"
+                            } else {
+                                "在线 · ${bot.computer}"
+                            },
                             fontSize = 11.sp,
                             color = Flux.text3,
                             maxLines = 1,
@@ -538,7 +609,7 @@ private fun ChatHead(bot: Bot, onOpen: () -> Unit) {
                     }
                 }
             }
-            IconBtn(FIcon.More, onClick = { ui.sheet = Sheet.BotMenu(bot.id) })
+            IconBtn(FIcon.More, onClick = { ui?.sheet = Sheet.BotMenu(bot.id) })
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
     }
@@ -546,15 +617,25 @@ private fun ChatHead(bot: Bot, onOpen: () -> Unit) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageRow(msg: Message, senderBot: Bot?, onLongPress: () -> Unit) {
-    val ui = LocalUi.current
+internal fun MessageRow(
+    msg: Message,
+    senderBot: Bot?,
+    onLongPress: () -> Unit,
+    /** 生产路径传入真实触感；截图脚手架保持空回调。 */
+    onLikeHaptic: () -> Unit = {},
+    onComponentAction: (ComponentAction) -> Unit = {},
+) {
     val user = msg.role == "user"
     var liked by remember { mutableStateOf(false) }
     val likeScale = remember { Animatable(1f) }
+    val likeScope = rememberCoroutineScope()
+    val hasComponent = msg.component != null
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val maxW = maxWidth * 0.79f
         val sender = if (user) null else senderBot
         val withAvatar = sender != null
+        // 组件卡片比普通气泡宽一些，否则表格 / 按钮会被挤成竖条。
+        val rowMax = if (hasComponent) maxWidth * 0.93f else maxW
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = if (user) Arrangement.End else Arrangement.Start,
@@ -566,7 +647,7 @@ private fun MessageRow(msg: Message, senderBot: Bot?, onLongPress: () -> Unit) {
             }
             Column(
                 Modifier
-                    .widthIn(max = if (withAvatar) maxW - 36.dp else maxW),
+                    .widthIn(max = if (withAvatar) rowMax - 36.dp else rowMax),
                 horizontalAlignment = if (user) Alignment.End else Alignment.Start,
             ) {
                 if (!user && msg.sender != null && !withAvatar) {
@@ -589,14 +670,21 @@ private fun MessageRow(msg: Message, senderBot: Bot?, onLongPress: () -> Unit) {
                         .background(if (user) Flux.accentSoft else Flux.panel2)
                         .border(1.dp, if (user) Flux.accentLine else Flux.line, shape)
                         .combinedClickable(onClick = {}, onLongClick = onLongPress)
-                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                        .padding(
+                            horizontal = if (hasComponent) 9.dp else 14.dp,
+                            vertical = if (hasComponent) 8.dp else 11.dp,
+                        ),
                 ) {
-                    Text(
-                        msg.text,
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp,
-                        color = if (user) Color(0xFFD9FFF1) else Color(0xFFDBE2DF),
-                    )
+                    if (hasComponent) {
+                        ComponentView(msg.component, onComponentAction)
+                    } else {
+                        Text(
+                            msg.displayText(),
+                            fontSize = 14.sp,
+                            lineHeight = 21.sp,
+                            color = if (user) Color(0xFFD9FFF1) else Color(0xFFDBE2DF),
+                        )
+                    }
                 }
                 Row(
                     Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp),
@@ -618,8 +706,8 @@ private fun MessageRow(msg: Message, senderBot: Bot?, onLongPress: () -> Unit) {
                                 }
                                 .clickable {
                                     liked = !liked
-                                    ui.haptic(6)
-                                    ui.scope.launch {
+                                    onLikeHaptic()
+                                    likeScope.launch {
                                         likeScale.snapTo(0.86f)
                                         likeScale.animateTo(
                                             targetValue = 1f,
@@ -671,7 +759,7 @@ private fun AvatarStack(bots: List<Bot>) {
 }
 
 @Composable
-private fun TypingRow() {
+private fun TypingRow(animated: Boolean = true) {
     val shape = RoundedCornerShape(
         topStart = 18.dp,
         topEnd = 18.dp,
@@ -689,16 +777,22 @@ private fun TypingRow() {
             horizontalArrangement = Arrangement.spacedBy(5.dp),
         ) {
             repeat(3) { i ->
-                val t = rememberInfiniteTransition(label = "typing$i")
-                val a by t.animateFloat(
-                    initialValue = 0.35f,
-                    targetValue = 1f,
-                    animationSpec = infiniteRepeatable(
-                        tween(600, delayMillis = i * 150, easing = LinearEasing),
-                        RepeatMode.Reverse,
-                    ),
-                    label = "typingA$i",
-                )
+                val a = if (!animated) {
+                    // 截图固定帧：三点同时可见，避免无限动画被拍到空白。
+                    listOf(1f, 0.68f, 0.42f)[i]
+                } else {
+                    val t = rememberInfiniteTransition(label = "typing$i")
+                    val animatedAlpha by t.animateFloat(
+                        initialValue = 0.35f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            tween(600, delayMillis = i * 150, easing = LinearEasing),
+                            RepeatMode.Reverse,
+                        ),
+                        label = "typingA$i",
+                    )
+                    animatedAlpha
+                }
                 Box(Modifier.size(6.dp).clip(CircleShape).background(Flux.text3.copy(alpha = a)))
             }
         }
@@ -802,6 +896,111 @@ private fun ApprovalButton(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/**
+ * 仅用于 JVM 截图（Paparazzi）的聊天页快照。
+ *
+ * 复用真实 ChatHead / MessageRow / TypingRow / GroupWorkingRow / ApprovalCard /
+ * 快捷 chips / 输入栏，但不读取 LocalStore、不轮询远端决策、不发网络请求。
+ */
+@Composable
+internal fun ChatSnapshot(
+    bot: Bot,
+    messages: List<Message>,
+    pending: PendingDecision? = null,
+    approving: Boolean = false,
+    waiting: Boolean = false,
+    typing: Boolean = false,
+    workingBots: List<Bot> = emptyList(),
+    groupMembers: List<Bot> = emptyList(),
+    input: String = "",
+    fontFamily: FontFamily? = null,
+    onAction: (String) -> Unit = {},
+    onComponentAction: (ComponentAction) -> Unit = {},
+) {
+    FluxTheme {
+        val inheritedStyle = LocalTextStyle.current
+        CompositionLocalProvider(
+            LocalTextStyle provides if (fontFamily != null) {
+                inheritedStyle.copy(fontFamily = fontFamily)
+            } else {
+                inheritedStyle
+            },
+        ) {
+            Column(Modifier.fillMaxSize().background(Flux.bg)) {
+                ChatHead(
+                    bot = bot,
+                    onOpen = {},
+                    interactive = false,
+                    subtitleOverride = if (bot.group) {
+                        "${groupMembers.size} 个成员 · 群聊"
+                    } else {
+                        "在线 · ${bot.computer}"
+                    },
+                )
+
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    item(key = "system") {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            Text(
+                                if (bot.group) {
+                                    "今天 · ${groupMembers.joinToString("、") { it.name }} 的群聊"
+                                } else {
+                                    "今天 · 与 ${bot.name} 的对话"
+                                },
+                                fontSize = 11.sp,
+                                color = Flux.text4,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(Color(0xFF0C0F12))
+                                    .border(1.dp, Flux.lineSoft, RoundedCornerShape(14.dp))
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                    items(messages, key = { it.id }) { msg ->
+                        MessageRow(
+                            msg = msg,
+                            senderBot = groupMembers.firstOrNull { it.name == msg.sender },
+                            onLongPress = {},
+                            onComponentAction = onComponentAction,
+                        )
+                    }
+                    if (typing) {
+                        item(key = "typing") { TypingRow(animated = false) }
+                    }
+                    if (workingBots.isNotEmpty()) {
+                        item(key = "working") { GroupWorkingRow(workingBots) }
+                    }
+                }
+
+                Column(Modifier.fillMaxWidth()) {
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
+                    pending?.let {
+                        ApprovalCard(
+                            decision = it,
+                            busy = approving,
+                            waiting = waiting,
+                            onChoose = onAction,
+                        )
+                    }
+                    ChatChips(onPick = onAction)
+                    ChatComposer(
+                        hint = if (bot.group) "在群里发消息" else "发消息给 ${bot.name}",
+                        input = input,
+                        onInputChange = {},
+                        onSend = {},
+                        onAttach = {},
+                    )
+                }
+            }
+        }
     }
 }
 

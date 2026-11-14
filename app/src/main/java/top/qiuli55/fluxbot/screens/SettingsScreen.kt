@@ -90,6 +90,13 @@ fun SettingsScreen() {
                     onClick = { ui.push(Route.MemoryImport) },
                 )
                 ItemRow(
+                    title = "权限审批",
+                    sub = "哪些操作需要你先点头 · 对所有 Bot 生效",
+                    trailing = { RowChevron() },
+                    showDivider = true,
+                    onClick = { ui.push(Route.ApprovalRules) },
+                )
+                ItemRow(
                     title = "连接服务器",
                     sub = "Bot 后端地址与访问令牌",
                     trailing = { RowValue(if (store.api.baseUrl.contains("instabox")) "已预填" else "自定义"); Spacer(Modifier.width(6.dp)); RowChevron() },

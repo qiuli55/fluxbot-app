@@ -17,3 +17,6 @@ keystore/
 
 # Kotlin 编译器本地缓存
 .kotlin/
+
+# Paparazzi 截图原始产物（对外截图另存到 /workspace/app-component-shots-v2）
+app/src/test/snapshots/

@@ -38,6 +38,52 @@ data class RemoteTurn(
     val userText: String,
 )
 
+/**
+ * 会话历史里的一条消息。
+ *
+ * 服务端对任何 kind 都返回 `role` / `kind` / `content` / `payload`；
+ * 组件消息（kind=component 或既有类型附带 payload.component）解析出 [component]，
+ * 解析失败时保留 [content] / [fallbackText] 走纯文本。
+ */
+data class RemoteMessage(
+    val role: String,
+    val content: String,
+    val kind: String = "text",
+    val component: ComponentNode? = null,
+    val fallbackText: String = "",
+    val createdAt: String = "",
+) {
+    fun displayText(): String = content.ifBlank { fallbackText }
+}
+
+/**
+ * 解析会话接口返回的一条消息。
+ *
+ * 不按 kind 过滤：文本、component 以及附带 payload.component 的既有类型
+ * （file_card / plan_card / handoff / subtask / run_finished / secure_input /
+ * decision …）都会变成 [RemoteMessage]。组件无法解析时保留 content / fallback。
+ */
+internal fun parseRemoteMessage(o: JSONObject): RemoteMessage? {
+    val role = o.optStringOrEmpty("role").ifEmpty { "assistant" }
+    val kind = o.optStringOrEmpty("kind").ifEmpty { "text" }
+    val content = o.optStringOrEmpty("content")
+    // payload 可能是对象，也可能是历史数据里的 JSON 字符串。
+    val payload = when (val raw = o.opt("payload")) {
+        is JSONObject -> raw
+        is String -> runCatching { JSONObject(raw) }.getOrNull()
+        else -> null
+    }
+    val envelope = parseComponentEnvelope(payload)
+    return RemoteMessage(
+        role = role,
+        content = content,
+        kind = kind,
+        component = envelope?.root,
+        fallbackText = envelope?.fallbackText.orEmpty(),
+        createdAt = o.optStringOrEmpty("created_at"),
+    )
+}
+
 /** 云端密钥库提供的一个可选模型；keyId 空表示运行时原生模型。 */
 data class RemoteModel(
     val model: String,
@@ -535,17 +581,21 @@ class Api(context: Context) {
         throw ApiException("等待回复超时")
     }
 
-    /** 拉取 Bot 会话历史，返回 (role, content) 列表，只保留文本消息。 */
-    suspend fun conversation(botId: String, limit: Int = 50): List<Pair<String, String>> =
+    /**
+     * 拉取 Bot 会话历史。
+     *
+     * 不再丢弃非文本 kind：服务端会为 file_card / plan_card / handoff / subtask /
+     * run_finished / secure_input / decision 等既有类型附带 payload.component，
+     * 这里统一解析成组件树交给渲染器；没有组件树的消息退回 content。
+     */
+    suspend fun conversation(botId: String, limit: Int = 50): List<RemoteMessage> =
         withContext(Dispatchers.IO) {
             val data = request("GET", "/api/v1/bots/$botId/conversation?limit=$limit", null)
                 .optJSONObject("data") ?: JSONObject()
             val messages = data.optJSONArray("messages") ?: JSONArray()
             (0 until messages.length()).mapNotNull { index ->
                 val o = messages.optJSONObject(index) ?: return@mapNotNull null
-                val kind = o.optStringOrEmpty("kind")
-                if (kind.isNotEmpty() && kind != "text") return@mapNotNull null
-                o.optStringOrEmpty("role") to o.optStringOrEmpty("content")
+                parseRemoteMessage(o)
             }
         }
 
@@ -607,6 +657,59 @@ class Api(context: Context) {
         request("POST", "/api/v1/tasks/$taskId/decisions/choose", body)
         Unit
     }
+
+    // ---------- 全局审批规则 ----------
+
+    /**
+     * 列出当前用户的全部审批规则（含已停用项）。
+     *
+     * 规则按云用户隔离，对名下所有 Bot 生效；空列表 = 默认零审批。
+     */
+    suspend fun listApprovalRules(): List<ApprovalRule> = withContext(Dispatchers.IO) {
+        val data = request("GET", "/api/v1/approval-rules", null).dataArray()
+        (0 until data.length()).mapNotNull { i ->
+            data.optJSONObject(i)?.let(::approvalRuleFromJson)
+        }
+    }
+
+    /** 新增一条用户规则；created_by_kind 由服务端固定为 user。 */
+    suspend fun createApprovalRule(draft: ApprovalRuleDraft): ApprovalRule? =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject()
+                .put("type", draft.type)
+                .put("params", JSONObject().apply {
+                    draft.params.forEach { (key, value) -> put(key, value) }
+                })
+                .put("enabled", true)
+            if (draft.description.isNotBlank()) body.put("description", draft.description)
+            parseRuleResponse(request("POST", "/api/v1/approval-rules", body))
+        }
+
+    /** 启停 / 修改一条规则（只提交传入的字段）。 */
+    suspend fun updateApprovalRule(
+        ruleId: String,
+        enabled: Boolean? = null,
+        type: String? = null,
+        params: Map<String, Any>? = null,
+        description: String? = null,
+    ): ApprovalRule? = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+        if (enabled != null) body.put("enabled", enabled)
+        if (type != null) body.put("type", type)
+        if (params != null) body.put("params", JSONObject().apply {
+            params.forEach { (key, value) -> put(key, value) }
+        })
+        if (description != null) body.put("description", description)
+        parseRuleResponse(request("PATCH", "/api/v1/approval-rules/$ruleId", body))
+    }
+
+    suspend fun deleteApprovalRule(ruleId: String): Unit = withContext(Dispatchers.IO) {
+        request("DELETE", "/api/v1/approval-rules/$ruleId", null)
+        Unit
+    }
+
+    private fun parseRuleResponse(root: JSONObject): ApprovalRule? =
+        root.optJSONObject("data")?.let(::approvalRuleFromJson)
 
     // ---------- 记忆 / 定时任务 / 运行记录 ----------
 

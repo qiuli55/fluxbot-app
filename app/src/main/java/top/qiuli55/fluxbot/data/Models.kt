@@ -23,7 +23,16 @@ data class Message(
     val time: String,
     val card: TaskCard? = null,
     val sender: String? = null,
-)
+    /** 生成式组件树；为空时按 [text] 纯文本渲染。 */
+    val component: ComponentNode? = null,
+    /** 服务端原始消息类型（text / component / file_card / plan_card …）。 */
+    val kind: String = "",
+    /** 组件不可解析时的纯文本兜底。 */
+    val fallbackText: String = "",
+) {
+    /** 组件缺失 / 解析失败时真正展示的文本。 */
+    fun displayText(): String = text.ifBlank { fallbackText }
+}
 
 data class Memory(val id: String, val text: String, val source: String, val ts: String)
 
@@ -134,12 +143,18 @@ fun Message.toJson() = JSONObject()
     .apply {
         card?.let { put("card", it.toJson()) }
         sender?.let { put("sender", it) }
+        component?.let { put("component", it.toJson()) }
+        if (kind.isNotEmpty()) put("kind", kind)
+        if (fallbackText.isNotEmpty()) put("fallbackText", fallbackText)
     }
 
 fun messageFromJson(o: JSONObject) = Message(
     o.getString("id"), o.getString("role"), o.getString("text"), o.getString("time"),
     if (o.has("card")) cardFromJson(o.getJSONObject("card")) else null,
     o.optString("sender").takeIf { it.isNotEmpty() },
+    o.optJSONObject("component")?.let { parseComponentNode(it) },
+    o.optString("kind"),
+    o.optString("fallbackText"),
 )
 
 fun Memory.toJson() = JSONObject().put("id", id).put("text", text).put("source", source).put("ts", ts)

@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("app.cash.paparazzi")
 }
 
 android {
@@ -91,4 +92,7 @@ dependencies {
     // JVM 单元测试：只测纯解析 / 合并逻辑，不拉起 Android 框架或 Robolectric。
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+
+    // 仅用于 JVM 截图：Paparazzi 走 layoutlib，不需要模拟器。
+    testImplementation("app.cash.paparazzi:paparazzi:1.3.5")
 }

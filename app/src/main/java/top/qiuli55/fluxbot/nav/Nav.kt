@@ -46,6 +46,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import top.qiuli55.fluxbot.data.Store
 import top.qiuli55.fluxbot.screens.AccountScreen
+import top.qiuli55.fluxbot.screens.ApprovalRulesScreen
 import top.qiuli55.fluxbot.screens.AppsScreen
 import top.qiuli55.fluxbot.screens.AuthScreen
 import top.qiuli55.fluxbot.screens.BotScreen
@@ -68,6 +69,7 @@ sealed interface Route {
     data class BotDesktop(val botId: String) : Route
     data class Library(val botId: String) : Route
     data object Settings : Route
+    data object ApprovalRules : Route
     data object Account : Route
     data object Vault : Route
     data object Apps : Route
@@ -207,6 +209,7 @@ fun FluxApp(store: Store) {
                         is Route.BotDesktop -> DesktopScreen(route.botId)
                         is Route.Library -> LibraryScreen(route.botId)
                         Route.Settings -> SettingsScreen()
+                        Route.ApprovalRules -> ApprovalRulesScreen()
                         Route.Account -> AccountScreen()
                         Route.Vault -> VaultScreen()
                         Route.Apps -> AppsScreen()

@@ -105,6 +105,15 @@ class GenerativeComponentSnapshotsTest {
         index = 0,
     )
 
+    private fun image(alt: String, index: Int) = ComponentNode.Image(
+        deliveryId = "delivery-$index",
+        alt = alt,
+        mime = "image/png",
+        width = 1200,
+        height = 1500,
+        index = index,
+    )
+
     private fun serverAction(name: String, actionId: String, decisionId: String = "", option: String = "") =
         ComponentAction(
             type = "server",
@@ -137,6 +146,48 @@ class GenerativeComponentSnapshotsTest {
                     ),
                 ),
                 fallback = "这是刚才拍的会议室白板，右上角是下周的排期。",
+            ),
+        ),
+    )
+
+    @Test
+    fun imageStack4() = chat(
+        "19-image-stack-4",
+        listOf(
+            userMsg("is4-u", "10:04", "权限审批的几张截图发我看看。"),
+            componentMsg(
+                "is4-c",
+                "10:05",
+                ComponentNode.Card(
+                    children = listOf(
+                        text("这四张是「权限审批」的截图，左右滑动可以切换，点一下能放大看。"),
+                        image("规则列表 · 每条都标了创建者", 0),
+                        image("添加付款超过 500 元的规则", 1),
+                        image("添加命令或任务的规则", 2),
+                        image("收到认不出的组件时退回纯文本", 3),
+                    ),
+                ),
+                fallback = "四张权限审批截图：规则列表、付款规则、命令任务规则、纯文本兜底。",
+            ),
+        ),
+    )
+
+    @Test
+    fun imageStack2() = chat(
+        "20-image-stack-2",
+        listOf(
+            userMsg("is2-u", "11:04", "首页改版的两版设计稿都发我。"),
+            componentMsg(
+                "is2-c",
+                "11:05",
+                ComponentNode.Card(
+                    children = listOf(
+                        text("两版设计稿都在这里，左右滑动切换。"),
+                        image("首页改版 · 第三版", 0),
+                        image("首页改版 · 第四版", 1),
+                    ),
+                ),
+                fallback = "两版首页改版设计稿。",
             ),
         ),
     )

@@ -102,9 +102,14 @@ private fun ComponentCard(card: ComponentNode.Card, onAction: (ComponentAction) 
     }
 }
 
-/** 子节点列：连续按钮自动并排成一行（「允许 / 拒绝」不会竖着堆）。 */
+/**
+ * 子节点列：连续按钮自动并排成一行（「允许 / 拒绝」不会竖着堆）。
+ * 同一个容器里有 2 张及以上图片时，图片收成一副叠卡，其余文字照常排在上下。
+ */
 @Composable
 private fun ComponentChildren(children: List<ComponentNode>, onAction: (ComponentAction) -> Unit) {
+    val imageStack = stackedImages(children)
+    var stackRendered = false
     var index = 0
     while (index < children.size) {
         if (index > 0) Spacer(Modifier.height(9.dp))
@@ -128,6 +133,14 @@ private fun ComponentChildren(children: List<ComponentNode>, onAction: (Componen
                     )
                 }
             }
+            continue
+        }
+        if (child is ComponentNode.Image && imageStack != null) {
+            if (!stackRendered) {
+                ImageStack(imageStack)
+                stackRendered = true
+            }
+            index += 1
             continue
         }
         ComponentNodeView(child, onAction)
@@ -622,8 +635,17 @@ private fun ProgressBubble(node: ComponentNode.Progress) {
 
 @Composable
 private fun ListBubble(node: ComponentNode.ListBlock, onAction: (ComponentAction) -> Unit) {
+    val imageStack = stackedImages(node.items)
+    var stackRendered = false
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         node.items.forEachIndexed { index, item ->
+            if (item is ComponentNode.Image && imageStack != null) {
+                if (!stackRendered) {
+                    ImageStack(imageStack)
+                    stackRendered = true
+                }
+                return@forEachIndexed
+            }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 if (node.ordered) {
                     Box(

@@ -145,7 +145,11 @@ fun ApprovalRulesScreen() {
                 try {
                     if (existing == null) {
                         val created = store.api.createApprovalRule(draft)
-                        if (created != null) rules = rules + created
+                        if (created == null) {
+                            ui.showToast("保存失败：服务端没有返回规则")
+                            return@launch
+                        }
+                        rules = rules + created
                         ui.showToast("规则已添加")
                     } else {
                         val updated = store.api.updateApprovalRule(
@@ -154,9 +158,11 @@ fun ApprovalRulesScreen() {
                             params = draft.params,
                             description = draft.description,
                         )
-                        if (updated != null) {
-                            rules = rules.map { if (it.id == existing.id) updated else it }
+                        if (updated == null) {
+                            ui.showToast("保存失败：服务端没有返回规则")
+                            return@launch
                         }
+                        rules = rules.map { if (it.id == existing.id) updated else it }
                         ui.showToast("规则已更新")
                     }
                     editor = null

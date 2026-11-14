@@ -396,12 +396,17 @@ private fun RuleRow(
                 )
             }
         }
-        Spacer(Modifier.width(4.dp))
         Box(
-            Modifier.size(30.dp).clip(CircleShape).clickable { onDelete() },
+            Modifier.size(24.dp).clip(CircleShape).clickable { onEdit() },
             contentAlignment = Alignment.Center,
         ) {
-            FIcon(FIcon.Trash, size = 14.dp, color = if (rule.enabled) Flux.text4 else Flux.danger)
+            FIcon(FIcon.Pencil, size = 13.dp, color = Flux.text4)
+        }
+        Box(
+            Modifier.size(24.dp).clip(CircleShape).clickable { onDelete() },
+            contentAlignment = Alignment.Center,
+        ) {
+            FIcon(FIcon.Trash, size = 13.dp, color = if (rule.enabled) Flux.text4 else Flux.danger)
         }
     }
 }

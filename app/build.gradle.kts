@@ -49,6 +49,10 @@ android {
             )
             if (releaseKeystore != null) {
                 signingConfig = signingConfigs.getByName("release")
+            } else {
+                // 本地没有正式密钥时退回调试签名，保证 assembleRelease 能产出可安装的 APK；
+                // CI 只要注入了 FLUXBOT_KEYSTORE_PATH 就始终使用正式密钥。
+                signingConfig = signingConfigs.getByName("debug")
             }
         }
     }

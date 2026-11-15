@@ -231,6 +231,26 @@ object DemoData {
         loggedIn = false,
     )
 
+    /**
+     * Flux 云账号对应的本机账户：不塞演示 Bot，首页直接从后端拉取该用户名下的
+     * Bot；对话、记忆与保管库按这个账户 id 隔离。
+     */
+    fun cloudAccount(id: String, email: String, name: String, initials: String): AccountState =
+        AccountState(
+            account = Account(
+                id = id,
+                name = name.ifBlank { email.substringBefore("@") },
+                email = email,
+                initials = initials.ifBlank { email.take(2).uppercase() },
+                plan = "Flux Cloud",
+                used = 0,
+            ),
+            bots = emptyList(),
+            settings = Settings(),
+            vault = emptyList(),
+            connected = emptyList(),
+        )
+
     /** 新账户：一个主 Bot + 一条问候。 */
     fun newAccount(email: String, name: String): AccountState {
         val id = "acc-" + (100000 + (0..899999).random())

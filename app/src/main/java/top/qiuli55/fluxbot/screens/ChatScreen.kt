@@ -73,9 +73,13 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Bot
+import org.json.JSONObject
 import top.qiuli55.fluxbot.data.ComponentAction
 import top.qiuli55.fluxbot.data.Message
 import top.qiuli55.fluxbot.data.PendingDecision
+import top.qiuli55.fluxbot.data.listRoutineDetails
+import top.qiuli55.fluxbot.data.routineTriggerSummary
+import top.qiuli55.fluxbot.data.updateRoutineDetail
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Route
@@ -85,6 +89,7 @@ import top.qiuli55.fluxbot.ui.Flux
 import top.qiuli55.fluxbot.ui.FluxTheme
 import top.qiuli55.fluxbot.ui.IconBtn
 import top.qiuli55.fluxbot.ui.PageHead
+import top.qiuli55.fluxbot.ui.Pill
 import java.util.UUID
 
 private val CHIPS = listOf("总结未读消息", "安排今天", "查一下资料", "写一条周报")
@@ -144,6 +149,46 @@ fun ChatScreen(botId: String) {
         while (true) {
             pollPendingDecisions()
             delay(2000)
+        }
+    }
+
+    /** 一轮结束后对比例程列表：Bot 新建的例程在对话里补一张本地卡片。 */
+    suspend fun announceNewRoutines(before: Set<String>) {
+        try {
+            store.api.listRoutineDetails(botId)
+                .filter { it.id !in before }
+                .forEach { routine ->
+                    store.addMessage(
+                        botId = botId,
+                        role = "bot",
+                        text = "Bot 已为你创建例程 ${routine.name}",
+                        kind = "routine_created",
+                        payload = mapOf(
+                            "routine_id" to routine.id,
+                            "name" to routine.name,
+                            "schedule" to routineTriggerSummary(routine),
+                            "next" to routine.nextRunAt,
+                        ),
+                    )
+                }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 只是补卡片，失败不打扰对话。
+        }
+    }
+
+    fun pauseRoutine(routineId: String) {
+        ui.scope.launch {
+            try {
+                store.api.updateRoutineDetail(botId, routineId, enabled = false)
+                ui.showToast("例程已暂停")
+                ui.refreshData()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ui.showToast(e.message ?: "暂停失败")
+            }
         }
     }
 
@@ -262,6 +307,7 @@ fun ChatScreen(botId: String) {
                 component = remote.component,
                 kind = remote.kind,
                 fallbackText = remote.fallbackText,
+                payload = remote.payload,
             )
         }
         store.replaceMessages(botId, history)
@@ -285,6 +331,9 @@ fun ChatScreen(botId: String) {
         if (!bot.group && bot.remote && bot.id.isNotBlank()) {
             ui.scope.launch {
                 typing = true
+                val routinesBefore = runCatching {
+                    store.api.listRoutineDetails(bot.id).map { it.id }.toSet()
+                }.getOrNull()
                 try {
                     val clientTurnId = UUID.randomUUID().toString()
                     val started = try {
@@ -300,6 +349,7 @@ fun ChatScreen(botId: String) {
                     // 回合刚开始就立即查一次，别让批准卡片等下一个 2 秒轮询。
                     pollPendingDecisions()
                     waitTurn(started.id)
+                    routinesBefore?.let { announceNewRoutines(it) }
                 } finally {
                     typing = false
                     store.setWorking(botId, false)
@@ -438,6 +488,11 @@ fun ChatScreen(botId: String) {
                     senderBot = groupMembers.firstOrNull { it.name == msg.sender },
                     onLongPress = { ui.sheet = Sheet.MessageMenu(botId, msg.id, msg.displayText()) },
                     onComponentAction = ::handleComponentAction,
+                    onOpenSubtask = { ui.push(Route.BotDetail(botId, tab = 2)) },
+                    onOpenRoutine = { routineId ->
+                        ui.sheet = Sheet.RoutineDetail(botId, routineId)
+                    },
+                    onPauseRoutine = ::pauseRoutine,
                 )
             }
             if (typing) {
@@ -624,7 +679,14 @@ internal fun MessageRow(
     /** 生产路径传入真实触感；截图脚手架保持空回调。 */
     onLikeHaptic: () -> Unit = {},
     onComponentAction: (ComponentAction) -> Unit = {},
+    onOpenSubtask: (() -> Unit)? = null,
+    onOpenRoutine: ((String) -> Unit)? = null,
+    onPauseRoutine: ((String) -> Unit)? = null,
 ) {
+    if (msg.kind == "subtask" || msg.kind == "routine_created" || msg.kind == "decision_result") {
+        InlineEventCard(msg, onOpenSubtask, onOpenRoutine, onPauseRoutine)
+        return
+    }
     val user = msg.role == "user"
     var liked by remember { mutableStateOf(false) }
     val likeScale = remember { Animatable(1f) }
@@ -723,6 +785,181 @@ internal fun MessageRow(
     }
 }
 
+/** 对话里的系统事件卡：后台子任务 / Bot 创建的例程 / 已处理审批。 */
+@Composable
+internal fun InlineEventCard(
+    msg: Message,
+    onOpenSubtask: (() -> Unit)?,
+    onOpenRoutine: ((String) -> Unit)?,
+    onPauseRoutine: ((String) -> Unit)?,
+) {
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(Flux.panel2)
+            .border(1.dp, Flux.line, shape)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        when (msg.kind) {
+            "subtask" -> {
+                val status = msg.payload["status"].orEmpty()
+                val running = status in setOf(
+                    "running", "executing", "queued", "pending", "waiting_for_user_decision",
+                )
+                val title = msg.payload["title"].orEmpty().ifBlank { msg.displayText() }
+                val summary = msg.payload["summary"].orEmpty()
+                    .ifBlank { msg.payload["result"].orEmpty() }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.size(7.dp).clip(CircleShape)
+                            .background(if (running) Flux.warn else Flux.text4),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        title.ifBlank { "后台子任务" },
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight(560),
+                        color = Flux.text,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Pill(
+                        when {
+                            running -> "运行中"
+                            status == "completed" -> "已完成"
+                            status == "cancelled" -> "已取消"
+                            status == "failed" -> "失败"
+                            else -> "已结束"
+                        },
+                        if (running) Flux.warn else if (status == "failed") Flux.danger else Flux.text3,
+                        if (running) Color(0x1FE8B25E) else Flux.panel3,
+                    )
+                }
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    if (running) "运行中 · 不占用对话" else summary.ifBlank { "结果已回到对话" },
+                    fontSize = 11.5.sp,
+                    color = Flux.text3,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (onOpenSubtask != null) {
+                    Text(
+                        "查看子任务",
+                        fontSize = 11.5.sp,
+                        color = Flux.accent,
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .clickable { onOpenSubtask() },
+                    )
+                }
+            }
+            "routine_created" -> {
+                val routineId = msg.payload["routine_id"].orEmpty()
+                    .ifBlank { msg.payload["id"].orEmpty() }
+                val name = msg.payload["name"].orEmpty().ifBlank { "新例程" }
+                val schedule = msg.payload["schedule"].orEmpty()
+                val next = msg.payload["next"].orEmpty()
+                    .ifBlank { msg.payload["next_run_at"].orEmpty() }
+                Text("Bot 已为你创建例程", fontSize = 11.sp, color = Flux.accent)
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    name,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight(560),
+                    color = Flux.text,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    listOfNotNull(
+                        schedule.takeIf { it.isNotBlank() },
+                        next.takeIf { it.isNotBlank() }?.let { "下次 $it" },
+                    ).joinToString(" · ").ifBlank { "已排期" },
+                    fontSize = 11.5.sp,
+                    color = Flux.text3,
+                )
+                Row(
+                    Modifier.padding(top = 9.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (onOpenRoutine != null && routineId.isNotBlank()) {
+                        InlineAction("查看") { onOpenRoutine(routineId) }
+                    }
+                    if (onPauseRoutine != null && routineId.isNotBlank()) {
+                        InlineAction("暂停") { onPauseRoutine(routineId) }
+                    }
+                }
+            }
+            else -> {
+                val decision = runCatching {
+                    msg.payload["decision"]?.takeIf { it.isNotBlank() }?.let { JSONObject(it) }
+                }.getOrNull()
+                val kind = decision?.optString("kind").orEmpty()
+                val meta = decision?.optJSONObject("meta")
+                val channel = meta?.optString("channel").orEmpty()
+                val tool = meta?.optString("tool_name").orEmpty()
+                val label = when {
+                    channel.isNotBlank() -> when (channel) {
+                        "feishu" -> "飞书"
+                        "wecom" -> "企业微信"
+                        "dingtalk" -> "钉钉"
+                        else -> channel
+                    }
+                    tool.isNotBlank() -> tool
+                    kind == "approval_rule_change" -> "审批规则"
+                    else -> "审批"
+                }
+                val question = decision?.optString("question").orEmpty().ifBlank { msg.displayText() }
+                val chosen = decision?.optString("chosen").orEmpty()
+                val expired = msg.payload["expired"] == "true"
+                val status = when {
+                    expired -> "已过期"
+                    chosen.isNotBlank() -> "已$chosen"
+                    else -> "已处理"
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "$label · $question",
+                        fontSize = 12.5.sp,
+                        color = Flux.text2,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Pill(
+                        status,
+                        if (expired) Flux.text3 else Flux.accent,
+                        if (expired) Flux.panel3 else Flux.accentSoft,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineAction(text: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .height(30.dp)
+            .clip(RoundedCornerShape(15.dp))
+            .background(Flux.panel3)
+            .border(1.dp, Flux.line, RoundedCornerShape(15.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 13.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, fontSize = 11.5.sp, color = Flux.text)
+    }
+}
+
 /** 群聊工作中：头像堆叠 + 正在完成 / 多个 bot 正在工作。 */
 @Composable
 private fun GroupWorkingRow(bots: List<Bot>) {
@@ -799,13 +1036,36 @@ private fun TypingRow(animated: Boolean = true) {
     }
 }
 
-/** 高风险工具审批卡：只存在于界面上，不写入消息列表。 */
+/** 审批卡：工具 / 出站草稿 / 通用决策，只存在于界面上，不写入消息列表。 */
 @Composable
-private fun ApprovalCard(
+internal fun ApprovalCard(
     decision: PendingDecision,
     busy: Boolean,
     waiting: Boolean,
     onChoose: (String) -> Unit,
+) {
+    val channel = decision.meta["channel"].orEmpty()
+    val tool = decision.meta["tool_name"].orEmpty()
+    when {
+        channel.isNotBlank() || decision.kind.endsWith("_outbound") ->
+            OutboundApprovalCard(decision, busy, waiting, onChoose)
+        tool.isNotBlank() || decision.kind in setOf(
+            "high_risk_command", "protected_access", "rule_match", "tool_permission_prompt",
+        ) -> ToolApprovalCard(decision, busy, waiting, onChoose)
+        else -> GenericApprovalCard(decision, busy, waiting, onChoose)
+    }
+}
+
+@Composable
+private fun ApprovalShell(
+    title: String,
+    badgeColor: Color,
+    note: String,
+    busy: Boolean,
+    waiting: Boolean,
+    options: List<String>,
+    onChoose: (String) -> Unit,
+    body: @Composable () -> Unit,
 ) {
     val shape = RoundedCornerShape(18.dp)
     Column(
@@ -821,9 +1081,9 @@ private fun ApprovalCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            FIcon(FIcon.Shield, size = 14.dp, color = Flux.warn)
+            Box(Modifier.size(7.dp).clip(CircleShape).background(badgeColor))
             Text(
-                decision.question.ifBlank { "需要你批准" },
+                title,
                 fontSize = 13.5.sp,
                 fontWeight = FontWeight(560),
                 color = Flux.text,
@@ -831,26 +1091,14 @@ private fun ApprovalCard(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (decision.detail.isNotBlank()) {
-            Text(
-                decision.detail,
-                fontSize = 12.sp,
-                color = Flux.text3,
-                lineHeight = 18.sp,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-        if (waiting) {
-            Text(
-                "等待你的批准",
-                fontSize = 11.sp,
-                color = Flux.text4,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-        val labels = decision.options.ifEmpty { listOf("允许", "拒绝") }
+        body()
+        Text(
+            if (waiting) "等待你的批准 · $note" else note,
+            fontSize = 10.5.sp,
+            color = Flux.text4,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        val labels = options.ifEmpty { listOf("允许", "拒绝") }
         Row(
             Modifier.fillMaxWidth().padding(top = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -865,6 +1113,171 @@ private fun ApprovalCard(
                     onClick = { onChoose(label) },
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun ToolApprovalCard(
+    decision: PendingDecision,
+    busy: Boolean,
+    waiting: Boolean,
+    onChoose: (String) -> Unit,
+) {
+    val tool = decision.meta["tool_name"].orEmpty()
+    val command = decision.detail.lineSequence()
+        .firstOrNull { it.startsWith("命令：") }
+        ?.removePrefix("命令：")
+        ?.trim()
+        .orEmpty()
+    val risk = decision.detail.lineSequence()
+        .firstOrNull { it.startsWith("风险：") }
+        ?.removePrefix("风险：")
+        ?.trim()
+        .orEmpty()
+    val dir = decision.meta["working_dir"].orEmpty()
+    ApprovalShell(
+        title = decision.question.ifBlank {
+            if (tool.isBlank()) "需要你批准" else "Claude 请求使用 $tool"
+        },
+        badgeColor = Flux.warn,
+        note = "仅本次有效 · 10 分钟无响应自动拒绝",
+        busy = busy,
+        waiting = waiting,
+        options = decision.options,
+        onChoose = onChoose,
+    ) {
+        if (command.isNotBlank()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 9.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF090B0D))
+                    .border(1.dp, Flux.lineSoft, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 11.dp, vertical = 9.dp),
+            ) {
+                Text(
+                    command,
+                    fontSize = 11.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFFCFE9DE),
+                    lineHeight = 17.sp,
+                    maxLines = 5,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (dir.isNotBlank()) {
+                    Text(
+                        dir,
+                        fontSize = 10.5.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = Flux.text4,
+                        modifier = Modifier.padding(top = 5.dp),
+                    )
+                }
+            }
+        } else if (decision.detail.isNotBlank()) {
+            Text(
+                decision.detail,
+                fontSize = 12.sp,
+                color = Flux.text3,
+                lineHeight = 18.sp,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        if (risk.isNotBlank()) {
+            Text(
+                "风险：$risk",
+                fontSize = 10.5.sp,
+                color = Flux.warn,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun OutboundApprovalCard(
+    decision: PendingDecision,
+    busy: Boolean,
+    waiting: Boolean,
+    onChoose: (String) -> Unit,
+) {
+    val channel = decision.meta["channel"].orEmpty()
+    val channelText = when (channel) {
+        "feishu" -> "飞书"
+        "wecom" -> "企业微信"
+        "dingtalk" -> "钉钉"
+        "email" -> "邮箱"
+        else -> channel.ifBlank { "频道" }
+    }
+    val chat = decision.meta["chat_id"].orEmpty()
+    val preview = decision.detail.lineSequence()
+        .filterNot { it.startsWith("准备发送到") || it.startsWith("触发规则：") }
+        .joinToString("\n")
+        .trim()
+    ApprovalShell(
+        title = listOfNotNull(
+            "发送到$channelText",
+            chat.takeIf { it.isNotBlank() },
+        ).joinToString(" · "),
+        badgeColor = Flux.accent,
+        note = "出站草稿 · 允许后只发送一次",
+        busy = busy,
+        waiting = waiting,
+        options = decision.options,
+        onChoose = onChoose,
+    ) {
+        if (preview.isNotBlank()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 9.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Flux.panel3)
+                    .padding(horizontal = 11.dp, vertical = 9.dp),
+            ) {
+                Text(
+                    preview,
+                    fontSize = 12.sp,
+                    color = Flux.text2,
+                    lineHeight = 18.sp,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GenericApprovalCard(
+    decision: PendingDecision,
+    busy: Boolean,
+    waiting: Boolean,
+    onChoose: (String) -> Unit,
+) {
+    ApprovalShell(
+        title = decision.question.ifBlank { "需要你批准" },
+        badgeColor = Flux.warn,
+        note = "仅本次有效",
+        busy = busy,
+        waiting = waiting,
+        options = decision.options,
+        onChoose = onChoose,
+    ) {
+        if (decision.detail.isNotBlank()) {
+            Text(
+                decision.detail,
+                fontSize = 12.sp,
+                color = Flux.text3,
+                lineHeight = 18.sp,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 6.dp),
+            )
         }
     }
 }

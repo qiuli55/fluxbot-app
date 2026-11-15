@@ -15,11 +15,11 @@ import javax.crypto.spec.GCMParameterSpec
  * Keystore 加密的小型键值库：AES-256-GCM，密钥由系统托管，不出安全硬件。
  * 落盘格式为 base64(iv):base64(ciphertext)，明文不会进入 SharedPreferences。
  */
-class SecureStore(context: Context) {
+class SecureStore(context: Context) : SecretStore {
 
     private val prefs = context.getSharedPreferences("fluxbot.secure", Context.MODE_PRIVATE)
 
-    fun get(key: String): String? {
+    override fun get(key: String): String? {
         val stored = prefs.getString(key, null) ?: return null
         return runCatching {
             val parts = stored.split(":")
@@ -36,7 +36,7 @@ class SecureStore(context: Context) {
         }
     }
 
-    fun put(key: String, value: String): Boolean = runCatching {
+    override fun put(key: String, value: String): Boolean = runCatching {
         val cipher = Cipher.getInstance(TRANSFORM)
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val body = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
@@ -45,20 +45,21 @@ class SecureStore(context: Context) {
         prefs.edit().putString(key, stored).commit()
     }.getOrDefault(false)
 
-    fun remove(key: String) {
+    override fun remove(key: String) {
         prefs.edit().remove(key).apply()
     }
 
     /** 删除某个账号名下的全部密文（删账户时用）。 */
-    fun removePrefix(prefix: String) {
+    override fun removePrefix(prefix: String) {
         val keys = prefs.all.keys.filter { it.startsWith(prefix) }
         if (keys.isEmpty()) return
         prefs.edit().apply { keys.forEach { remove(it) } }.apply()
     }
 
-    fun getJson(key: String): JSONObject? = get(key)?.let { runCatching { JSONObject(it) }.getOrNull() }
+    override fun getJson(key: String): JSONObject? =
+        get(key)?.let { runCatching { JSONObject(it) }.getOrNull() }
 
-    fun putJson(key: String, value: JSONObject): Boolean = put(key, value.toString())
+    override fun putJson(key: String, value: JSONObject): Boolean = put(key, value.toString())
 
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance(KEYSTORE).apply { load(null) }

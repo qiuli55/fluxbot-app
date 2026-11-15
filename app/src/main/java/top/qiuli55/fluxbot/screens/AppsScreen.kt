@@ -43,6 +43,7 @@ import top.qiuli55.fluxbot.data.Store
 import top.qiuli55.fluxbot.nav.AppUi
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
+import top.qiuli55.fluxbot.nav.Route
 import top.qiuli55.fluxbot.nav.Sheet
 import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
@@ -53,19 +54,19 @@ fun AppsScreen() {
     val store = LocalStore.current
     val ui = LocalUi.current
     val connected = store.current().connected
-    val signedIn = store.api.token.isNotBlank()
-    var github by remember { mutableStateOf<RemoteConnector?>(null) }
+    val signedIn = store.api.authToken.isNotBlank()
+    var connectors by remember { mutableStateOf<List<RemoteConnector>>(emptyList()) }
     var cat by remember { mutableStateOf("全部") }
     var query by remember { mutableStateOf("") }
 
     // 登录后以后端连接器为准（目前只有 GitHub）；关闭弹层后重新拉一次状态。
     LaunchedEffect(signedIn, ui.sheet) {
         if (!signedIn) {
-            github = null
+            connectors = emptyList()
             return@LaunchedEffect
         }
         try {
-            github = store.api.listConnectors().firstOrNull { it.id == "github" }
+            connectors = store.api.listConnectors()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -73,8 +74,12 @@ fun AppsScreen() {
         }
     }
 
+    val github = connectors.firstOrNull { it.id == "github" }
+    val email = connectors.firstOrNull { it.id == "email" }
+    val calendar = connectors.firstOrNull { it.id == "calendar" }
+
     fun appConnected(id: String): Boolean =
-        if (id == "github" && signedIn && github != null) github?.connected == true
+        if (id == "github" && signedIn) github?.connected == true
         else connected.contains(id)
 
     fun appAccount(id: String): String =
@@ -87,7 +92,8 @@ fun AppsScreen() {
     val visible = if (q.isEmpty()) byCat else byCat.filter { it.name.lowercase().contains(q) }
     val featured = if (cat == "全部") visible.filter { it.featured } else emptyList()
     val rest = if (cat == "全部") visible.filterNot { it.featured } else visible
-    val connectedCount = all.count { appConnected(it.id) }
+    val connectedCount = all.count { appConnected(it.id) } +
+        listOf(email?.connected == true, calendar?.connected == true).count { it }
 
     Box(Modifier.fillMaxSize().background(Flux.bg)) {
         Column(Modifier.fillMaxSize()) {
@@ -129,6 +135,24 @@ fun AppsScreen() {
                     .verticalScroll(rememberScrollState())
                     .padding(start = 16.dp, end = 16.dp, bottom = 88.dp),
             ) {
+                SectionTitle("自建服务 · 不经第三方授权")
+                SelfHostedRow(
+                    glyph = "邮",
+                    title = "邮箱",
+                    sub = if (email?.connected == true) {
+                        "IMAP / SMTP · ${email.account.ifBlank { "已连接" }}"
+                    } else "IMAP 收信 / SMTP 发信",
+                    connected = email?.connected == true,
+                ) { ui.push(Route.EmailConnector) }
+                SelfHostedRow(
+                    glyph = "日",
+                    title = "日历",
+                    sub = if (calendar?.connected == true) {
+                        "${if (calendar.mode == "ics") "ICS 订阅" else "CalDAV"} · ${calendar.host.ifBlank { "已连接" }}"
+                    } else "CalDAV / ICS 订阅",
+                    connected = calendar?.connected == true,
+                ) { ui.push(Route.CalendarConnector) }
+
                 if (featured.isNotEmpty()) {
                     SectionTitle("推荐 · 常用")
                     featured.forEach { app ->
@@ -218,6 +242,57 @@ private fun ConnectedPill(count: Int) {
         contentAlignment = Alignment.Center,
     ) {
         Text("已连接 $count", fontSize = 12.sp, color = Flux.text2)
+    }
+}
+
+@Composable
+private fun SelfHostedRow(
+    glyph: String,
+    title: String,
+    sub: String,
+    connected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(42.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF171C20)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(glyph, fontSize = 15.sp, fontWeight = FontWeight(620), color = Flux.accent)
+        }
+        Spacer(Modifier.width(13.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.5.sp, fontWeight = FontWeight(460), color = Flux.text)
+            Spacer(Modifier.height(3.dp))
+            Text(
+                sub,
+                fontSize = 11.5.sp,
+                color = Flux.text3,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Box(
+            Modifier
+                .height(30.dp)
+                .clip(RoundedCornerShape(15.dp))
+                .background(if (connected) Flux.accentSoft else Flux.panel3)
+                .padding(horizontal = 12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                if (connected) "已连接" else "配置",
+                fontSize = 11.5.sp,
+                color = if (connected) Flux.accent else Flux.text2,
+            )
+        }
     }
 }
 

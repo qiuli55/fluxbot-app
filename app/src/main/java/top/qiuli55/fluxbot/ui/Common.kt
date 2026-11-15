@@ -197,7 +197,12 @@ fun PrimaryButton(
 }
 
 @Composable
-fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun SecondaryButton(
+    text: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
     Box(
         modifier
             .fillMaxWidth()
@@ -205,10 +210,15 @@ fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> 
             .clip(RoundedCornerShape(25.dp))
             .background(Flux.panel2)
             .border(1.dp, Flux.lineSoft, RoundedCornerShape(25.dp))
-            .clickable { onClick() },
+            .clickable(enabled = enabled) { onClick() },
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, fontSize = 15.sp, fontWeight = FontWeight(460), color = Flux.text)
+        Text(
+            text,
+            fontSize = 15.sp,
+            fontWeight = FontWeight(460),
+            color = if (enabled) Flux.text else Flux.text4,
+        )
     }
 }
 

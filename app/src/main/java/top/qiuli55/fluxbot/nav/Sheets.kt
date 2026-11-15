@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import android.content.Intent
+import android.util.Log
 import android.net.Uri
 import android.os.Build
 import androidx.compose.animation.fadeIn
@@ -42,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -70,10 +72,29 @@ import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Api
 import top.qiuli55.fluxbot.data.ApiException
 import top.qiuli55.fluxbot.data.Bot
+import top.qiuli55.fluxbot.data.CloudSettings
 import top.qiuli55.fluxbot.data.DeviceLogin
 import top.qiuli55.fluxbot.data.ModelCatalog
 import top.qiuli55.fluxbot.data.RemoteConnector
+import top.qiuli55.fluxbot.data.RemoteRoutineDetail
+import top.qiuli55.fluxbot.data.RemoteVaultLogin
 import top.qiuli55.fluxbot.data.VaultSecrets
+import top.qiuli55.fluxbot.data.appendJournal
+import top.qiuli55.fluxbot.data.createSkill
+import top.qiuli55.fluxbot.data.createSubtask
+import top.qiuli55.fluxbot.data.deleteProfile
+import top.qiuli55.fluxbot.data.deleteRoutineDetail
+import top.qiuli55.fluxbot.data.getPage
+import top.qiuli55.fluxbot.data.getSkill
+import top.qiuli55.fluxbot.data.listRoutineDetails
+import top.qiuli55.fluxbot.data.listVaultLogins
+import top.qiuli55.fluxbot.data.normalizeAccountBaseUrl
+import top.qiuli55.fluxbot.data.putProfile
+import top.qiuli55.fluxbot.data.relativeTime
+import top.qiuli55.fluxbot.data.revealLoginPassword
+import top.qiuli55.fluxbot.data.updatePage
+import top.qiuli55.fluxbot.data.updateRoutineDetail
+import top.qiuli55.fluxbot.data.updateSkill
 import top.qiuli55.fluxbot.ip.FloAvatarStill
 import top.qiuli55.fluxbot.screens.BotAvatar
 import top.qiuli55.fluxbot.ui.EmptyCard
@@ -90,8 +111,8 @@ import top.qiuli55.fluxbot.ui.SegTabs
 import top.qiuli55.fluxbot.ui.SecondaryButton
 
 sealed interface Sheet {
-    data object Login : Sheet
     data object AddAccount : Sheet
+    data object CloudServer : Sheet
     data object Usage : Sheet
     data object Subscription : Sheet
     data class Connector(val id: String) : Sheet
@@ -108,8 +129,16 @@ sealed interface Sheet {
     data object UseComputer : Sheet
     data class VaultAdd(val cat: String) : Sheet
     data class VaultDetail(val itemId: String) : Sheet
+    data class ServerVaultDetail(val loginId: String) : Sheet
     data class MemoryAdd(val botId: String) : Sheet
     data class RoutineAdd(val botId: String) : Sheet
+    data class RoutineDetail(val botId: String, val routineId: String) : Sheet
+    data class SubtaskAdd(val botId: String) : Sheet
+    data object SkillCreate : Sheet
+    data class SkillEdit(val skillId: String) : Sheet
+    data class ProfileEdit(val key: String, val value: String) : Sheet
+    data object JournalAdd : Sheet
+    data class PageEdit(val pageId: String) : Sheet
     data class RenameBot(val botId: String) : Sheet
     data object Grid : Sheet
     data object CreateMenu : Sheet
@@ -166,7 +195,7 @@ fun SheetHost() {
                 Modifier
                     .fillMaxSize()
                     .graphicsLayer { alpha = (1f - dragY / maskFadePx).coerceIn(0f, 1f) }
-                    .background(Color(0xFF040506).copy(alpha = 0.66f))
+                    .background(Color(0xFF040506).copy(alpha = 0.5f))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -231,8 +260,8 @@ fun SheetHost() {
 @Composable
 private fun SheetBody(sheet: Sheet) {
     when (sheet) {
-        Sheet.Login -> LoginSheet()
         Sheet.AddAccount -> AddAccountSheet()
+        Sheet.CloudServer -> CloudServerSheet()
         Sheet.Usage -> UsageSheet()
         Sheet.Subscription -> SubscriptionSheet()
         is Sheet.Connector -> ConnectorSheet(sheet.id)
@@ -249,8 +278,16 @@ private fun SheetBody(sheet: Sheet) {
         Sheet.UseComputer -> UseComputerSheet()
         is Sheet.VaultAdd -> VaultAddSheet(sheet.cat)
         is Sheet.VaultDetail -> VaultDetailSheet(sheet.itemId)
+        is Sheet.ServerVaultDetail -> ServerVaultDetailSheet(sheet.loginId)
         is Sheet.MemoryAdd -> MemoryAddSheet(sheet.botId)
         is Sheet.RoutineAdd -> RoutineAddSheet(sheet.botId)
+        is Sheet.RoutineDetail -> RoutineDetailSheet(sheet.botId, sheet.routineId)
+        is Sheet.SubtaskAdd -> SubtaskAddSheet(sheet.botId)
+        Sheet.SkillCreate -> SkillCreateSheet()
+        is Sheet.SkillEdit -> SkillEditSheet(sheet.skillId)
+        is Sheet.ProfileEdit -> ProfileEditSheet(sheet.key, sheet.value)
+        Sheet.JournalAdd -> JournalAddSheet()
+        is Sheet.PageEdit -> PageEditSheet(sheet.pageId)
         is Sheet.RenameBot -> RenameBotSheet(sheet.botId)
         Sheet.Grid -> GridSheet()
         Sheet.CreateMenu -> CreateMenuSheet()
@@ -362,31 +399,6 @@ private fun MenuItem(text: String, danger: Boolean = false, onClick: () -> Unit)
 // ---------- 账户 ----------
 
 @Composable
-private fun LoginSheet() {
-    val store = LocalStore.current
-    val ui = LocalUi.current
-    SheetFrame("登录 Flux 账号") {
-        SheetHint("选择一个演示账户。两个账户的 Bot、消息与记忆完全隔离。", top = 0)
-        Spacer(Modifier.height(4.dp))
-        store.state.accounts.forEach { acc ->
-            Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
-            OptionRow(
-                title = acc.account.name,
-                sub = acc.account.email,
-                leading = { InitialsAvatar(acc.account.initials, 38.dp) },
-                chevron = true,
-            ) {
-                store.login(acc.account.id)
-                ui.closeSheet()
-                ui.reset(Route.Home)
-                ui.showToast("已登录 · ${acc.account.email}")
-            }
-        }
-        SheetHint("账号由 flux.qiuli55.top 账号云统一管理。")
-    }
-}
-
-@Composable
 private fun AddAccountSheet() {
     val store = LocalStore.current
     val ui = LocalUi.current
@@ -414,6 +426,92 @@ private fun AddAccountSheet() {
                 ui.showToast("已添加并切换到 $v")
             }
         }
+    }
+}
+
+/**
+ * Flux 账号服务器地址：只影响登录 / 注册 / 刷新，与 Bot 后端地址相互独立。
+ * 保存前用未鉴权的 GET /api/auth/providers 探活，失败时回退到原地址。
+ */
+@Composable
+private fun CloudServerSheet() {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val scope = rememberCoroutineScope()
+    var url by remember { mutableStateOf(store.cloudSettings.baseUrl) }
+    var testing by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf("") }
+    val normalized = normalizeAccountBaseUrl(url)
+
+    SheetFrame("Flux 账号服务器") {
+        SheetHint(
+            "登录、注册与令牌刷新都发往这个地址；与 Bot 后端地址互相独立。",
+            top = 0,
+        )
+        Spacer(Modifier.height(14.dp))
+        FieldLabel("账号服务器地址")
+        Spacer(Modifier.height(8.dp))
+        FluxInput(
+            url,
+            { url = it; result = "" },
+            placeholder = CloudSettings.DEFAULT_BASE_URL,
+            keyboardType = KeyboardType.Uri,
+        )
+        if (url.isNotBlank() && normalized == null) {
+            Text(
+                "请输入以 http:// 或 https:// 开头的完整地址",
+                fontSize = 11.5.sp,
+                color = Flux.danger,
+                modifier = Modifier.padding(start = 4.dp, top = 6.dp),
+            )
+        }
+        Text(
+            "默认 ${CloudSettings.DEFAULT_BASE_URL}",
+            fontSize = 11.sp,
+            color = Flux.text4,
+            lineHeight = 18.sp,
+            modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+        )
+        if (result.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            Text(result, fontSize = 12.sp, color = Flux.text2, lineHeight = 18.sp)
+        }
+        Spacer(Modifier.height(16.dp))
+        PrimaryButton(
+            if (testing) "正在连接…" else "测试并保存",
+            enabled = !testing && normalized != null,
+        ) {
+            val target = normalized ?: return@PrimaryButton
+            testing = true
+            scope.launch {
+                val previous = store.cloudSettings.baseUrl
+                store.cloudSettings.baseUrl = target
+                try {
+                    val providers = store.cloud.providers()
+                    result = "连接成功 · GitHub " +
+                        (if (providers.github) "已启用" else "未启用") +
+                        " · Google " +
+                        (if (providers.google) "已启用" else "未启用")
+                    ui.showToast("账号服务器已保存")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    store.cloudSettings.baseUrl = previous
+                    url = previous
+                    result = e.message ?: "连接失败，请检查地址"
+                } finally {
+                    testing = false
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        SecondaryButton("恢复默认地址") {
+            store.cloudSettings.reset()
+            url = store.cloudSettings.baseUrl
+            result = "已恢复默认地址"
+        }
+        Spacer(Modifier.height(6.dp))
+        SheetHint("地址只保存在本机；不会上传，也不会写进日志。")
     }
 }
 
@@ -1109,7 +1207,10 @@ private fun ServerSheet() {
                 }
             }
         }
-        SheetHint("配对码由服务器一次性签发；已有令牌只保存在本机，适用于高级场景。")
+        SheetHint(
+            "配对码由服务器一次性签发；已有令牌只保存在本机，适用于高级场景。" +
+                "用 Flux 账号登录时，请求优先使用账号 access token。",
+        )
     }
 }
 
@@ -1365,6 +1466,115 @@ private fun VaultDetailSheet(itemId: String) {
 }
 
 @Composable
+private fun ServerVaultDetailSheet(loginId: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val clipboard = LocalClipboardManager.current
+    var login by remember(loginId) { mutableStateOf<RemoteVaultLogin?>(null) }
+    var loading by remember(loginId) { mutableStateOf(true) }
+    var error by remember(loginId) { mutableStateOf("") }
+    var password by remember(loginId) { mutableStateOf<String?>(null) }
+    var revealing by remember(loginId) { mutableStateOf(false) }
+
+    LaunchedEffect(loginId) {
+        try {
+            login = store.api.listVaultLogins().firstOrNull { it.id == loginId }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("FluxBot/V040", "load server vault login failed id=$loginId", e)
+            error = e.message ?: "读取服务器保管库失败"
+        } finally {
+            loading = false
+        }
+    }
+
+    fun copy(value: String, label: String) {
+        clipboard.setText(AnnotatedString(value))
+        ui.haptic(6)
+        ui.showToast("已复制$label")
+    }
+
+    fun reveal() {
+        if (revealing) return
+        revealing = true
+        ui.scope.launch {
+            try {
+                password = store.api.revealLoginPassword(loginId)
+                ui.haptic(6)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("FluxBot/V040", "reveal login password failed id=$loginId", e)
+                ui.showToast(e.message ?: "取回密码失败")
+            } finally {
+                revealing = false
+            }
+        }
+    }
+
+    SheetFrame("服务器保管库") {
+        when {
+            loading -> SheetHint("正在读取…", top = 0)
+            login == null -> SheetHint(error.ifBlank { "这条记录不存在，可能已在别处删除。" }, top = 0)
+            else -> {
+                val item = login!!
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(Flux.panel2),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        FIcon(FIcon.Key, size = 20.dp, color = Flux.accent2)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            item.site.ifBlank { "未命名站点" },
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight(560),
+                            color = Flux.text,
+                        )
+                        Text(
+                            "服务器加密保存 · ${relativeTime(item.updatedAt).ifBlank { item.updatedAt }}",
+                            fontSize = 11.5.sp,
+                            color = Flux.text3,
+                            modifier = Modifier.padding(top = 3.dp),
+                        )
+                    }
+                }
+
+                DetailRow("用户名", item.username.ifBlank { "未保存" }) {
+                    if (item.username.isNotBlank()) {
+                        CopyChip { copy(item.username, "用户名") }
+                    }
+                }
+                DetailRow(
+                    "密码",
+                    when {
+                        !item.hasPassword -> "未保存"
+                        password != null -> password.orEmpty()
+                        else -> "••••••••"
+                    },
+                ) {
+                    if (item.hasPassword) {
+                        CircleIcon(FIcon.Eye) { if (password == null) reveal() else password = null }
+                        Spacer(Modifier.width(8.dp))
+                        if (password != null) {
+                            CopyChip { copy(password.orEmpty(), "密码") }
+                        }
+                    }
+                }
+                if (item.notes.isNotBlank()) DetailRow("备注", item.notes)
+                SheetHint("密码只在你点「显示」时从服务器取回，每次都会记一条审计日志；App 不把它写到本地。")
+            }
+        }
+    }
+}
+
+@Composable
 private fun DetailRow(label: String, value: String, trailing: (@Composable () -> Unit)? = null) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 12.dp),
@@ -1511,6 +1721,557 @@ private fun cronFor(time: String, freq: String): String? {
         else -> return null
     }
     return "$minute $hour * * $dow"
+}
+
+/* ---------------- 例程详情 / 编辑 ---------------- */
+
+/** 从 cron / 事件反推主触发类型：0 定时、1 Webhook、2 GitHub、3 邮件。 */
+private fun routineMode(routine: RemoteRoutineDetail): Int = when {
+    routine.schedule.isNotBlank() -> 0
+    routine.eventTriggers.any { it.startsWith("github") } -> 2
+    routine.eventTriggers.contains("email.received") -> 3
+    else -> 1
+}
+
+@Composable
+private fun RoutineDetailSheet(botId: String, routineId: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    var routine by remember(routineId) { mutableStateOf<RemoteRoutineDetail?>(null) }
+    var loading by remember(routineId) { mutableStateOf(true) }
+    var error by remember(routineId) { mutableStateOf("") }
+    var refresh by remember(routineId) { mutableStateOf(0) }
+
+    LaunchedEffect(botId, routineId, refresh) {
+        loading = true
+        error = ""
+        try {
+            routine = store.api.listRoutineDetails(botId).firstOrNull { it.id == routineId }
+            if (routine == null) error = "这个例程已经不在了。"
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("FluxBot/V040", "routine detail failed bot=$botId id=$routineId", e)
+            error = e.message ?: "例程加载失败"
+        } finally {
+            loading = false
+        }
+    }
+
+    SheetFrame("例程") {
+        val current = routine
+        when {
+            loading -> EmptyCard("正在读取例程…")
+            current == null -> {
+                Text(
+                    error.ifBlank { "例程加载失败。" },
+                    fontSize = 13.sp, color = Flux.danger, lineHeight = 20.sp,
+                )
+                Spacer(Modifier.height(14.dp))
+                SecondaryButton("重试") { refresh++ }
+            }
+            else -> RoutineDetailForm(
+                botId = botId,
+                routine = current,
+                onSaved = {
+                    ui.refreshData()
+                    ui.closeSheet()
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun RoutineDetailForm(
+    botId: String,
+    routine: RemoteRoutineDetail,
+    onSaved: () -> Unit,
+) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    var name by remember(routine.id) { mutableStateOf(routine.name) }
+    var instruction by remember(routine.id) { mutableStateOf(routine.instruction) }
+    var schedule by remember(routine.id) {
+        mutableStateOf(routine.schedule.ifBlank { "0 9 * * *" })
+    }
+    var mode by remember(routine.id) { mutableIntStateOf(routineMode(routine)) }
+    var events by remember(routine.id) { mutableStateOf(routine.eventTriggers.toSet()) }
+    var busy by remember(routine.id) { mutableStateOf(false) }
+    val modes = listOf("定时", "Webhook", "GitHub", "邮件")
+
+    FieldLabel("名称")
+    FluxInput(name, { name = it }, placeholder = "例程名称")
+
+    FieldLabel("触发方式")
+    SegTabs(modes, mode, { picked ->
+        mode = picked
+        val base = when (picked) {
+            1 -> "webhook.deploy"
+            2 -> "github.push"
+            3 -> "email.received"
+            else -> null
+        }
+        if (base != null) events = events + base
+    })
+
+    if (mode == 0) {
+        FieldLabel("定时（5 段 cron）")
+        FluxInput(schedule, { schedule = it }, placeholder = "0 9 * * *", center = true)
+        SheetHint("分 时 日 月 周，按 Bot 时区解释。例：0 9 * * * 每天 09:00。")
+    } else {
+        FieldLabel("事件")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            EventChip("Webhook", events.any { it.startsWith("webhook") }) {
+                events = if (events.any { it.startsWith("webhook") }) {
+                    events.filterNot { it.startsWith("webhook") }.toSet()
+                } else events + "webhook.deploy"
+            }
+            EventChip("GitHub push", events.contains("github.push")) {
+                events = if (events.contains("github.push")) events - "github.push"
+                else events + "github.push"
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            EventChip("GitHub 评论", events.contains("github.issue_comment")) {
+                events = if (events.contains("github.issue_comment")) events - "github.issue_comment"
+                else events + "github.issue_comment"
+            }
+            EventChip("新邮件", events.contains("email.received")) {
+                events = if (events.contains("email.received")) events - "email.received"
+                else events + "email.received"
+            }
+        }
+        SheetHint("事件名会原样订阅到服务器事件总线；Webhook 与 GitHub 入口在例程列表底部。")
+    }
+
+    FieldLabel("要做什么")
+    FluxTextArea(instruction, { instruction = it }, placeholder = "到这个点时让 Bot 做什么")
+
+    Spacer(Modifier.height(12.dp))
+    DetailLine("下次运行", routine.nextRunAt.ifBlank { "未排期" })
+    DetailLine("上次运行", routine.lastRunAt.ifBlank { "还没有运行记录" })
+    DetailLine("来源", "Bot 在对话里创建 · ${routine.createdAt.ifBlank { "时间未知" }}")
+    SheetHint("服务器暂未记录「来源对话」与每次运行结果，这里只展示最近一次运行时间。")
+
+    Spacer(Modifier.height(16.dp))
+    PrimaryButton(if (busy) "保存中…" else "保存", enabled = name.isNotBlank() && !busy) {
+        val cron = schedule.trim()
+        if (mode == 0 && cron.split(Regex("\\s+")).size != 5) {
+            ui.showToast("cron 需要 5 段，例如 0 9 * * *")
+            return@PrimaryButton
+        }
+        val base = when (mode) {
+            1 -> "webhook.deploy"
+            2 -> "github.push"
+            3 -> "email.received"
+            else -> null
+        }
+        val finalEvents = if (base == null) events else events + base
+        busy = true
+        ui.scope.launch {
+            try {
+                store.api.updateRoutineDetail(
+                    botId = botId,
+                    routineId = routine.id,
+                    name = name.trim(),
+                    instruction = instruction.trim(),
+                    schedule = if (mode == 0) cron else null,
+                    clearSchedule = mode != 0,
+                    eventTriggers = finalEvents.toList(),
+                )
+                store.refreshBotRoutines(botId)
+                ui.showToast("例程已保存")
+                onSaved()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("FluxBot/V040", "update routine failed id=${routine.id}", e)
+                ui.showToast(e.message ?: "保存失败")
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    Spacer(Modifier.height(10.dp))
+    SecondaryButton(if (routine.enabled) "暂停例程" else "开启例程") {
+        if (busy) return@SecondaryButton
+        busy = true
+        ui.scope.launch {
+            try {
+                store.api.updateRoutineDetail(
+                    botId, routine.id, enabled = !routine.enabled,
+                )
+                store.refreshBotRoutines(botId)
+                ui.showToast(if (routine.enabled) "例程已暂停" else "例程已开启")
+                ui.refreshData()
+                ui.closeSheet()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("FluxBot/V040", "toggle routine failed id=${routine.id}", e)
+                ui.showToast(e.message ?: "更新失败")
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    Spacer(Modifier.height(10.dp))
+    DangerButton("删除例程") {
+        ui.sheet = Sheet.Confirm(
+            title = "删除例程？",
+            text = "「${routine.name}」将不再自动执行，无法恢复。",
+            action = "删除",
+            danger = true,
+        ) {
+            ui.scope.launch {
+                try {
+                    store.api.deleteRoutineDetail(botId, routine.id)
+                    store.refreshBotRoutines(botId)
+                    ui.showToast("例程已删除")
+                    ui.refreshData()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("FluxBot/V040", "delete routine failed id=${routine.id}", e)
+                    ui.showToast(e.message ?: "删除失败")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EventChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) Flux.accentSoft else Flux.panel2)
+            .border(
+                1.dp,
+                if (selected) Flux.accentLine else Flux.line,
+                RoundedCornerShape(50),
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+    ) {
+        Text(
+            label,
+            fontSize = 11.5.sp,
+            color = if (selected) Flux.accent else Flux.text3,
+        )
+    }
+}
+
+@Composable
+private fun DetailLine(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+        Text(label, fontSize = 11.5.sp, color = Flux.text4, modifier = Modifier.width(70.dp))
+        Text(value, fontSize = 12.sp, color = Flux.text2, modifier = Modifier.weight(1f))
+    }
+}
+
+/* ---------------- 派一个子任务 ---------------- */
+
+@Composable
+private fun SubtaskAddSheet(botId: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    var title by remember { mutableStateOf("") }
+    var instruction by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+
+    SheetFrame("派一个子任务") {
+        FieldLabel("标题（可选）")
+        FluxInput(title, { title = it }, placeholder = "例如：跑完这轮回归")
+        FieldLabel("要它做什么")
+        FluxTextArea(instruction, { instruction = it }, placeholder = "写清目标、范围和交付物")
+        SheetHint("子任务在后台独立运行，不占用当前对话；开始、完成、失败都会回到对话里。")
+        Spacer(Modifier.height(16.dp))
+        PrimaryButton(if (busy) "派发中…" else "派发", enabled = instruction.isNotBlank() && !busy) {
+            busy = true
+            ui.scope.launch {
+                try {
+                    store.api.createSubtask(botId, instruction.trim(), title.trim())
+                    ui.refreshData()
+                    ui.closeSheet()
+                    ui.showToast("子任务已派发")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("FluxBot/V040", "create subtask failed bot=$botId", e)
+                    ui.showToast(e.message ?: "派发失败")
+                } finally {
+                    busy = false
+                }
+            }
+        }
+    }
+}
+
+/* ---------------- 技能 / 共享记忆 / 页面 ---------------- */
+
+@Composable
+private fun SkillCreateSheet() {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var version by remember { mutableStateOf("v1.0") }
+    var body by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+
+    SheetFrame("新建技能") {
+        FieldLabel("名称")
+        FluxInput(name, { name = it }, placeholder = "例如：发布检查清单")
+        FieldLabel("说明（可选）")
+        FluxInput(description, { description = it }, placeholder = "一句话说明这个技能解决什么")
+        FieldLabel("版本")
+        FluxInput(version, { version = it }, placeholder = "v1.0", center = true)
+        FieldLabel("正文 · Markdown")
+        FluxTextArea(body, { body = it }, placeholder = "写给 Bot 的操作说明…", height = 180.dp)
+        SheetHint("启用的技能会随对话交给 Bot；正文最多 20 万字符。")
+        Spacer(Modifier.height(16.dp))
+        PrimaryButton(
+            if (busy) "创建中…" else "创建",
+            enabled = name.isNotBlank() && body.isNotBlank() && !busy,
+        ) {
+            busy = true
+            ui.scope.launch {
+                try {
+                    store.api.createSkill(name, body, description, version)
+                    ui.refreshData()
+                    ui.closeSheet()
+                    ui.showToast("技能已创建")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("FluxBot/V040", "create skill failed", e)
+                    ui.showToast(e.message ?: "创建失败")
+                } finally {
+                    busy = false
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SkillEditSheet(skillId: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    var loading by remember(skillId) { mutableStateOf(true) }
+    var name by remember(skillId) { mutableStateOf("") }
+    var description by remember(skillId) { mutableStateOf("") }
+    var version by remember(skillId) { mutableStateOf("") }
+    var body by remember(skillId) { mutableStateOf("") }
+    var busy by remember(skillId) { mutableStateOf(false) }
+
+    LaunchedEffect(skillId) {
+        try {
+            val skill = store.api.getSkill(skillId)
+            name = skill.name
+            description = skill.description
+            version = skill.version
+            body = skill.body
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("FluxBot/V040", "load skill failed id=$skillId", e)
+            ui.showToast(e.message ?: "技能加载失败")
+        } finally {
+            loading = false
+        }
+    }
+
+    SheetFrame("编辑技能") {
+        if (loading) {
+            EmptyCard("正在读取技能…")
+        } else {
+            FieldLabel("名称")
+            FluxInput(name, { name = it }, placeholder = "技能名称")
+            FieldLabel("说明")
+            FluxInput(description, { description = it }, placeholder = "一句话说明")
+            FieldLabel("版本")
+            FluxInput(version, { version = it }, placeholder = "v1.0", center = true)
+            FieldLabel("正文 · Markdown")
+            FluxTextArea(body, { body = it }, height = 180.dp)
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton(
+                if (busy) "保存中…" else "保存",
+                enabled = name.isNotBlank() && !busy,
+            ) {
+                busy = true
+                ui.scope.launch {
+                    try {
+                        store.api.updateSkill(
+                            skillId,
+                            name = name.trim(),
+                            description = description.trim(),
+                            version = version.trim(),
+                            body = body,
+                        )
+                        ui.refreshData()
+                        ui.closeSheet()
+                        ui.showToast("技能已保存")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w("FluxBot/V040", "update skill failed id=$skillId", e)
+                        ui.showToast(e.message ?: "保存失败")
+                    } finally {
+                        busy = false
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfileEditSheet(initialKey: String, initialValue: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val keys = listOf(
+        "name" to "称呼",
+        "locale" to "地区",
+        "timezone" to "时区",
+        "language" to "语言",
+        "occupation" to "职业",
+        "notes" to "备注",
+    )
+    var selected by remember(initialKey) {
+        mutableIntStateOf(keys.indexOfFirst { it.first == initialKey }.coerceAtLeast(0))
+    }
+    var value by remember(initialKey, initialValue) { mutableStateOf(initialValue) }
+    var busy by remember(initialKey) { mutableStateOf(false) }
+    val key = keys[selected].first
+
+    SheetFrame("共享资料") {
+        FieldLabel("字段")
+        SegTabs(keys.map { it.second }, selected, { selected = it })
+        FieldLabel("内容")
+        FluxInput(value, { value = it }, placeholder = "例如：小秋 / Asia/Shanghai")
+        SheetHint("所有 Bot 都能读到这条资料。留空保存会删除这个字段。")
+        Spacer(Modifier.height(16.dp))
+        PrimaryButton(if (busy) "保存中…" else "保存", enabled = !busy) {
+            busy = true
+            ui.scope.launch {
+                try {
+                    if (value.isBlank()) store.api.deleteProfile(key)
+                    else store.api.putProfile(mapOf(key to value.trim()))
+                    ui.refreshData()
+                    ui.closeSheet()
+                    ui.showToast("已保存")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("FluxBot/V040", "save profile failed key=$key", e)
+                    ui.showToast(e.message ?: "保存失败")
+                } finally {
+                    busy = false
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun JournalAddSheet() {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    var content by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+
+    SheetFrame("记一条") {
+        FieldLabel("内容")
+        FluxTextArea(content, { content = it }, placeholder = "临时信息、偏好变化、待办…", height = 140.dp)
+        SheetHint("这条记录会进入共享记忆，所有 Bot 都能看到。")
+        Spacer(Modifier.height(16.dp))
+        PrimaryButton(
+            if (busy) "保存中…" else "保存",
+            enabled = content.isNotBlank() && !busy,
+        ) {
+            busy = true
+            ui.scope.launch {
+                try {
+                    store.api.appendJournal(content)
+                    ui.refreshData()
+                    ui.closeSheet()
+                    ui.showToast("已记下")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("FluxBot/V040", "append journal failed", e)
+                    ui.showToast(e.message ?: "保存失败")
+                } finally {
+                    busy = false
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PageEditSheet(pageId: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    var loading by remember(pageId) { mutableStateOf(true) }
+    var title by remember(pageId) { mutableStateOf("") }
+    var body by remember(pageId) { mutableStateOf("") }
+    var busy by remember(pageId) { mutableStateOf(false) }
+
+    LaunchedEffect(pageId) {
+        try {
+            val page = store.api.getPage(pageId)
+            title = page.title
+            body = page.body
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("FluxBot/V040", "load page failed id=$pageId", e)
+            ui.showToast(e.message ?: "页面加载失败")
+        } finally {
+            loading = false
+        }
+    }
+
+    SheetFrame("编辑页面") {
+        if (loading) {
+            EmptyCard("正在读取页面…")
+        } else {
+            FieldLabel("标题")
+            FluxInput(title, { title = it }, placeholder = "页面标题")
+            FieldLabel("正文 · Markdown")
+            FluxTextArea(body, { body = it }, height = 200.dp)
+            SheetHint("保存会生成一个新版本；已公开的页面仍用原链接访问。")
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton(
+                if (busy) "保存中…" else "保存",
+                enabled = title.isNotBlank() && !busy,
+            ) {
+                busy = true
+                ui.scope.launch {
+                    try {
+                        store.api.updatePage(pageId, title.trim(), body)
+                        ui.refreshData()
+                        ui.closeSheet()
+                        ui.showToast("页面已保存")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w("FluxBot/V040", "update page failed id=$pageId", e)
+                        ui.showToast(e.message ?: "保存失败")
+                    } finally {
+                        busy = false
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

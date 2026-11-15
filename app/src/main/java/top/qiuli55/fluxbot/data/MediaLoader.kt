@@ -44,7 +44,7 @@ class MediaLoader(context: Context, private val api: Api) {
     /** 外部直链原样返回；服务端引用需要登录令牌，没有就返回 null。 */
     fun resolveUrl(ref: MediaRef, download: Boolean = false): String? {
         if (ref is MediaRef.Remote) return ref.url
-        if (api.token.isBlank()) return null
+        if (api.authToken.isBlank()) return null
         return ref.resolveUrl(api.baseUrl, download)
     }
 
@@ -158,7 +158,7 @@ class MediaLoader(context: Context, private val api: Api) {
         authenticated: Boolean,
         accept: String?,
     ): HttpURLConnection? {
-        val token = if (authenticated) runCatching { api.token }.getOrDefault("") else ""
+        val token = if (authenticated) runCatching { api.authToken }.getOrDefault("") else ""
         if (authenticated && token.isBlank()) return null
         return runCatching {
             (URL(url).openConnection() as HttpURLConnection).apply {

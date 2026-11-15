@@ -10,9 +10,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -90,6 +93,7 @@ fun FluxInput(
     center: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
     password: Boolean = false,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     val align = if (center) TextAlign.Center else TextAlign.Start
     val interaction = remember { MutableInteractionSource() }
@@ -102,34 +106,51 @@ fun FluxInput(
             .padding(horizontal = 14.dp),
         contentAlignment = if (center) Alignment.Center else Alignment.CenterStart,
     ) {
-        BasicTextField(
-            value = value,
-            onValueChange = onValueChange,
-            singleLine = true,
-            textStyle = TextStyle(
-                fontSize = fontSize,
-                color = Flux.text,
-                textAlign = align,
-                fontFeatureSettings = "tnum",
-            ),
-            cursorBrush = SolidColor(Flux.accent),
-            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-            visualTransformation =
-                if (password) PasswordVisualTransformation() else VisualTransformation.None,
-            interactionSource = interaction,
-            modifier = Modifier.fillMaxWidth(),
-            decorationBox = { inner ->
-                Box(
-                    Modifier.fillMaxWidth(),
-                    contentAlignment = if (center) Alignment.Center else Alignment.CenterStart,
-                ) {
-                    if (value.isEmpty() && placeholder.isNotEmpty()) {
-                        Text(placeholder, fontSize = fontSize, color = Flux.text4, textAlign = align)
-                    }
-                    inner()
-                }
-            },
-        )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.weight(1f),
+                contentAlignment = if (center) Alignment.Center else Alignment.CenterStart,
+            ) {
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        fontSize = fontSize,
+                        color = Flux.text,
+                        textAlign = align,
+                        fontFeatureSettings = "tnum",
+                    ),
+                    cursorBrush = SolidColor(Flux.accent),
+                    keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+                    visualTransformation =
+                        if (password) PasswordVisualTransformation() else VisualTransformation.None,
+                    interactionSource = interaction,
+                    modifier = Modifier.fillMaxWidth(),
+                    decorationBox = { inner ->
+                        Box(
+                            Modifier.fillMaxWidth(),
+                            contentAlignment =
+                                if (center) Alignment.Center else Alignment.CenterStart,
+                        ) {
+                            if (value.isEmpty() && placeholder.isNotEmpty()) {
+                                Text(
+                                    placeholder,
+                                    fontSize = fontSize,
+                                    color = Flux.text4,
+                                    textAlign = align,
+                                )
+                            }
+                            inner()
+                        }
+                    },
+                )
+            }
+            if (trailing != null) {
+                Spacer(Modifier.width(8.dp))
+                trailing()
+            }
+        }
     }
 }
 

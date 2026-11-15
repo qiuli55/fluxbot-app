@@ -13,8 +13,8 @@ android {
         applicationId = "top.qiuli55.fluxbot"
         minSdk = 26
         targetSdk = 34
-        versionCode = 30
-        versionName = "0.3.18"
+        versionCode = 32
+        versionName = "0.4.0-beta.2"
 
     }
 
@@ -49,6 +49,10 @@ android {
             )
             if (releaseKeystore != null) {
                 signingConfig = signingConfigs.getByName("release")
+            } else {
+                // 本地没有正式密钥时退回调试签名，保证 assembleRelease 能产出可安装的 APK；
+                // CI 只要注入了 FLUXBOT_KEYSTORE_PATH 就始终使用正式密钥。
+                signingConfig = signingConfigs.getByName("debug")
             }
         }
     }
@@ -77,6 +81,8 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.activity:activity-compose:1.8.2")
+    // 官方 Custom Tabs 库：Flux Cloud OAuth state 是第一方 Cookie，必须走系统浏览器而不是 WebView。
+    implementation("androidx.browser:browser:1.8.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
 
     implementation(platform("androidx.compose:compose-bom:2024.02.01"))

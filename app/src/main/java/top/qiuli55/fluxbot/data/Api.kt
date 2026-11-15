@@ -8,12 +8,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
 import java.io.IOException
 import java.net.ConnectException
-import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
-import java.net.URL
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
 
@@ -52,6 +49,8 @@ data class RemoteMessage(
     val component: ComponentNode? = null,
     val fallbackText: String = "",
     val createdAt: String = "",
+    /** 服务端 payload 的扁平化副本（子任务状态 / 决策结果等内联卡片用）。 */
+    val payload: Map<String, String> = emptyMap(),
 ) {
     fun displayText(): String = content.ifBlank { fallbackText }
 }
@@ -81,7 +80,24 @@ internal fun parseRemoteMessage(o: JSONObject): RemoteMessage? {
         component = envelope?.root,
         fallbackText = envelope?.fallbackText.orEmpty(),
         createdAt = o.optStringOrEmpty("created_at"),
+        payload = flattenPayload(payload),
     )
+}
+
+/** payload 里的嵌套对象（如 decision）序列化成字符串，卡片只做展示。 */
+internal fun flattenPayload(payload: JSONObject?): Map<String, String> {
+    if (payload == null) return emptyMap()
+    val result = LinkedHashMap<String, String>()
+    payload.keys().forEach { key ->
+        when (val value = payload.opt(key)) {
+            null, JSONObject.NULL -> Unit
+            is String -> if (value.isNotBlank()) result[key] = value
+            is JSONObject -> result[key] = value.toString()
+            is JSONArray -> result[key] = value.toString()
+            else -> result[key] = value.toString()
+        }
+    }
+    return result
 }
 
 /** 云端密钥库提供的一个可选模型；keyId 空表示运行时原生模型。 */
@@ -105,6 +121,8 @@ data class PendingDecision(
     val detail: String,
     val options: List<String>,
     val kind: String,
+    /** 决策 meta：command / channel / draft_id / chat_id 等展示字段。 */
+    val meta: Map<String, String> = emptyMap(),
 )
 
 /** 远端 Bot 的一条长期记忆。 */
@@ -159,6 +177,10 @@ data class RemoteConnector(
     val avatarUrl: String,
     val scopes: List<String>,
     val connectedAt: String,
+    /** calendar 专有：ics / caldav，未连接时为空。 */
+    val mode: String = "",
+    /** calendar 专有：脱敏后的主机名（不含完整 URL）。 */
+    val host: String = "",
 )
 
 /** 设备码登录的起始信息：用户在浏览器里输入 userCode 并授权。 */
@@ -193,41 +215,83 @@ internal fun JSONObject.optStringOrEmpty(key: String): String =
  *
  * 服务器地址存在普通 SharedPreferences；访问令牌属于登录态，按账号用 Keystore 加密保存。
  */
-class Api(context: Context) {
+class Api internal constructor(
+    private val prefs: KeyValueStore,
+    private val secure: SecretStore,
+    private val cloud: CloudAuthManager? = null,
+    private val logger: (String) -> Unit = {},
+) {
 
-    private val prefs = context.getSharedPreferences("fluxbot.api", Context.MODE_PRIVATE)
-    private val secure = SecureStore(context)
+    /** 生产入口：普通设置走 SharedPreferences，令牌走 Keystore 加密的 SecureStore。 */
+    constructor(
+        context: Context,
+        cloud: CloudAuthManager? = null,
+        logger: (String) -> Unit = {},
+    ) : this(
+        SharedPrefsKeyValueStore(context.getSharedPreferences("fluxbot.api", Context.MODE_PRIVATE)),
+        SecureStore(context),
+        cloud,
+        logger,
+    )
+
+    /** 默认请求栈：系统 HttpURLConnection（Android 上支持 PATCH）。 */
+    private val systemTransport: HttpTransport = UrlConnectionHttpTransport()
+
+    /** PATCH 专用：系统实现拒绝时（桌面 JVM）才回退到原始 socket。 */
+    private val patchTransport: HttpTransport = PatchFallbackHttpTransport(
+        primary = systemTransport,
+        fallback = RawHttpTransport(),
+        logger = logger,
+    )
 
     /** 当前账号；令牌按账号隔离，切账号时由 Store 更新。 */
     var accountId: String? = null
+
+    /**
+     * 云账号登录时 true：请求优先带 Flux 账号 access token；
+     * 未登录云账号 / 使用设备配对时 false，继续沿用设备令牌。
+     */
+    var useCloudAuth: Boolean = false
+
+    /**
+     * 当前请求应使用的 Bearer：云账号令牌优先，没有则退回设备令牌。
+     * 媒体下载等同步路径只看已缓存的 access token，不会在这里触发网络刷新。
+     */
+    val authToken: String
+        get() {
+            if (useCloudAuth) {
+                cloud?.cachedAccessToken()?.takeIf { it.isNotBlank() }?.let { return it }
+            }
+            return token
+        }
 
     private val tokenKey: String
         get() = accountId?.let { "acc.$it.api_token" } ?: SYS_TOKEN_KEY
 
     var baseUrl: String
         get() {
-            val saved = prefs.getString("base_url", null)?.trim()?.trimEnd('/')
+            val saved = prefs.getString("base_url")?.trim()?.trimEnd('/')
             // 旧的 InstaBox 裸域名在国内被 DNS 污染，自动迁移到 flux.qiuli55.top 反代
             if (saved.isNullOrEmpty() || saved.contains("instabox.tech")) return DEFAULT_BASE_URL
             return saved
         }
         set(value) {
-            prefs.edit().putString("base_url", value.trim().trimEnd('/')).apply()
+            prefs.putString("base_url", value.trim().trimEnd('/'))
         }
 
     var token: String
         get() = secure.get(tokenKey) ?: secure.get(SYS_TOKEN_KEY) ?: migrateLegacyToken() ?: ""
         set(value) {
             secure.put(tokenKey, value.trim())
-            prefs.edit().remove("token").apply()
+            prefs.remove("token")
         }
 
     /** 旧版本把令牌明文放在 SharedPreferences 里，读到后立刻迁进 Keystore 并清掉明文。 */
     private fun migrateLegacyToken(): String? {
-        val old = prefs.getString("token", null)?.trim().orEmpty()
+        val old = prefs.getString("token")?.trim().orEmpty()
         if (old.isEmpty()) return null
         secure.put(SYS_TOKEN_KEY, old)
-        prefs.edit().remove("token").apply()
+        prefs.remove("token")
         return old
     }
 
@@ -764,10 +828,10 @@ class Api(context: Context) {
     }
 
     /**
-     * 更新定时任务，优先用 PATCH（后端目前没有等价的 POST 更新入口）。
+     * 更新定时任务，用 PATCH（后端目前没有等价的 POST 更新入口）。
      *
-     * Android 上 HttpURLConnection 对 PATCH 的支持并不总是可靠；这里不伪造一个
-     * 不存在的 POST 接口，方法被拒时会原样抛出，由界面 toast 提示。
+     * PATCH 默认走系统 HttpURLConnection（Android 接受 PATCH）；只有桌面 JVM
+     * 的 setRequestMethod 抛出 ProtocolException 时才回退到 [RawHttpTransport]。
      */
     suspend fun updateRoutine(
         botId: String,
@@ -837,50 +901,82 @@ class Api(context: Context) {
 
     // ---------- 底层请求 ----------
 
-    private fun request(
+    /**
+     * 统一请求入口：云账号登录时使用账号 access token，并在收到 401 时
+     * 单飞刷新、原样重试一次；仍失败则把原始 401 抛给调用方（同时登录态
+     * 已由管理器的过期回调切回登录页）。设备令牌流程保持原样。
+     */
+    internal suspend fun request(
         method: String,
         path: String,
         body: JSONObject?,
         timeoutMs: Int = 60_000,
     ): JSONObject {
-        val conn = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = 15_000
-            readTimeout = timeoutMs
-            setRequestProperty("Accept", "application/json")
-            if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
-            // 本地账号隔离：服务端用它区分连接器记录（将来接真实登录后改为令牌 subject）
-            accountId?.takeIf { it.isNotBlank() }?.let {
-                setRequestProperty("X-Flux-Account", it)
-            }
+        val cloudToken = if (useCloudAuth) cloud?.accessTokenForRequest() else null
+        // 云账号登录态已经失效时不要把设备令牌发出去，直接让界面回登录页。
+        if (useCloudAuth && cloudToken == null) {
+            throw ApiException("登录已过期，请重新登录", 401, "cloud_expired")
         }
-        try {
-            if (body != null) {
-                conn.doOutput = true
-                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        return try {
+            requestOnce(method, path, body, timeoutMs, cloudToken ?: token)
+        } catch (e: ApiException) {
+            if (e.status == 401 && cloudToken != null && cloud != null) {
+                val refreshed = cloud.refreshAfterUnauthorized(cloudToken)
+                if (refreshed != null) {
+                    requestOnce(method, path, body, timeoutMs, refreshed)
+                } else {
+                    throw e
+                }
+            } else {
+                throw e
             }
-            val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val text = stream?.bufferedReader()?.use(BufferedReader::readText).orEmpty()
-            if (text.isBlank() && code in 200..299) {
-                return JSONObject().put("success", true)
-            }
-            val root = runCatching { JSONObject(text) }.getOrElse {
-                throw ApiException("服务器返回异常（HTTP $code）", code)
-            }
-            val success = root.optBoolean("success", code in 200..299)
-            if (code !in 200..299 || !success) {
-                val msg = root.optStringOrEmpty("message").ifEmpty { "请求失败（HTTP $code）" }
-                throw ApiException(msg, code, root.optStringOrEmpty("code"))
-            }
-            return root
-        } finally {
-            conn.disconnect()
         }
     }
 
-    private fun parseConnector(o: JSONObject): RemoteConnector {
+    private fun requestOnce(
+        method: String,
+        path: String,
+        body: JSONObject?,
+        timeoutMs: Int,
+        bearer: String,
+    ): JSONObject {
+        val headers = LinkedHashMap<String, String>()
+        headers["Accept"] = "application/json"
+        if (bearer.isNotBlank()) headers["Authorization"] = "Bearer $bearer"
+        // 本地账号隔离：服务端用它区分连接器记录（将来接真实登录后改为令牌 subject）
+        accountId?.takeIf { it.isNotBlank() }?.let { headers["X-Flux-Account"] = it }
+        val payload = body?.toString()
+        if (payload != null) headers["Content-Type"] = "application/json; charset=utf-8"
+        val request = HttpRequest(
+            method = method,
+            url = baseUrl + path,
+            body = payload,
+            headers = headers,
+            timeoutMs = timeoutMs,
+            connectTimeoutMs = 15_000,
+        )
+        // PATCH 优先走系统 HttpURLConnection；仅当 JVM 的 setRequestMethod 抛出
+        // ProtocolException 时才回退到最小 socket 实现（Android 不会触发回退）。
+        val transport: HttpTransport =
+            if (method.equals("PATCH", ignoreCase = true)) patchTransport else systemTransport
+        val response = transport.execute(request)
+        val code = response.code
+        val text = response.body
+        if (text.isBlank() && code in 200..299) {
+            return JSONObject().put("success", true)
+        }
+        val root = runCatching { JSONObject(text) }.getOrElse {
+            throw ApiException("服务器返回异常（HTTP $code）", code)
+        }
+        val success = root.optBoolean("success", code in 200..299)
+        if (code !in 200..299 || !success) {
+            val msg = root.optStringOrEmpty("message").ifEmpty { "请求失败（HTTP $code）" }
+            throw ApiException(msg, code, root.optStringOrEmpty("code"))
+        }
+        return root
+    }
+
+    internal fun parseConnector(o: JSONObject): RemoteConnector {
         val scopes = o.optJSONArray("scopes") ?: JSONArray()
         return RemoteConnector(
             id = o.optStringOrEmpty("id"),
@@ -892,6 +988,8 @@ class Api(context: Context) {
             avatarUrl = o.optStringOrEmpty("avatar_url"),
             scopes = (0 until scopes.length()).map { scopes.optString(it) },
             connectedAt = o.optStringOrEmpty("connected_at"),
+            mode = o.optStringOrEmpty("mode"),
+            host = o.optStringOrEmpty("host"),
         )
     }
 
@@ -906,7 +1004,7 @@ class Api(context: Context) {
     )
 
     /** 后端列表接口通常把数组放在 data 里；也兼容 data 对象内再包一层。 */
-    private fun JSONObject.dataArray(): JSONArray {
+    internal fun JSONObject.dataArray(): JSONArray {
         optJSONArray("data")?.let { return it }
         val obj = optJSONObject("data") ?: return JSONArray()
         return obj.optJSONArray("tasks")
@@ -937,6 +1035,7 @@ class Api(context: Context) {
             detail = o.optStringOrEmpty("context"),
             options = options,
             kind = o.optStringOrEmpty("kind"),
+            meta = flattenPayload(o.optJSONObject("meta")),
         )
     }
 
@@ -994,7 +1093,7 @@ class Api(context: Context) {
         )
     }
 
-    private fun displayTime(raw: String): String {
+    internal fun displayTime(raw: String): String {
         if (raw.isBlank()) return ""
         return raw.replace('T', ' ').removeSuffix("Z").take(16)
     }

@@ -1,6 +1,8 @@
 name: Android
 
 # 分支出包：编 debug APK，挂 Actions artifact 供手动检查。
+# 手动触发：build_type=release 时用 secrets 中的正式密钥签 release 包，
+# 只挂 artifact（含 sha256 与 mapping.txt），不创建 GitHub Release。
 # 打 tag（v*）：编 release APK，挂到 GitHub Release，作为发版下载源。
 # 一键发版见 deploy/release.sh（打 tag → 等 CI → 下载 → 镜像到 B 机）。
 on:
@@ -19,6 +21,14 @@ on:
       - "*.gradle.kts"
       - ".github/workflows/android.yml"
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: "构建类型；release 只在分支上手动出包，不发布 GitHub Release"
+        type: choice
+        options:
+          - debug
+          - release
+        default: debug
 
 # tag 构建完成后要把 APK 挂到 GitHub Release。
 permissions:
@@ -60,6 +70,10 @@ jobs:
               echo "::error::缺少 secrets.FLUXBOT_KEYSTORE_BASE64，无法签出可安装的 release 包"
               exit 1
             fi
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+              echo "::error::手动发布 release 需要 secrets.FLUXBOT_KEYSTORE_BASE64 与签名口令"
+              exit 1
+            fi
             echo "::warning::未配置 FLUXBOT_KEYSTORE_BASE64，debug 包将退回默认调试签名"
             exit 0
           fi
@@ -67,7 +81,7 @@ jobs:
           printf '%s' "$FLUXBOT_KEYSTORE_BASE64" | base64 -d > keystore/fluxbot-release.jks
 
       - name: Assemble debug APK
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') && !(github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release') }}
         env:
           FLUXBOT_KEYSTORE_PATH: ${{ github.workspace }}/keystore/fluxbot-release.jks
           FLUXBOT_KEYSTORE_PASSWORD: ${{ secrets.FLUXBOT_KEYSTORE_PASSWORD }}
@@ -76,7 +90,7 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon
 
       - name: Assemble release APK
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release') }}
         env:
           FLUXBOT_KEYSTORE_PATH: ${{ github.workspace }}/keystore/fluxbot-release.jks
           FLUXBOT_KEYSTORE_PASSWORD: ${{ secrets.FLUXBOT_KEYSTORE_PASSWORD }}
@@ -84,12 +98,70 @@ jobs:
           FLUXBOT_KEY_PASSWORD: ${{ secrets.FLUXBOT_KEY_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon
 
+      - name: Verify release APK signing key
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release' }}
+        env:
+          FLUXBOT_KEYSTORE_PASSWORD: ${{ secrets.FLUXBOT_KEYSTORE_PASSWORD }}
+          FLUXBOT_KEY_ALIAS: ${{ secrets.FLUXBOT_KEY_ALIAS }}
+        run: |
+          KEYSTORE="keystore/fluxbot-release.jks"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          if [ ! -f "$KEYSTORE" ]; then
+            echo "::error::keystore 未还原，拒绝发布未签名的 release APK"
+            exit 1
+          fi
+          if [ ! -f "$APK" ]; then
+            echo "::error::assembleRelease 未产出 app-release.apk"
+            exit 1
+          fi
+          CERT_SHA="$("$APKSIGNER" verify --print-certs "$APK" \
+            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+            | head -1 | tr -d ':\r' | tr 'a-f' 'A-F')"
+          EXPECTED_SHA="$(keytool -exportcert -keystore "$KEYSTORE" -alias "$FLUXBOT_KEY_ALIAS" \
+            -storepass "$FLUXBOT_KEYSTORE_PASSWORD" 2>/dev/null \
+            | sha256sum | cut -d' ' -f1 | tr 'a-f' 'A-F')"
+          if [ -z "$CERT_SHA" ] || [ "$CERT_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::release APK 的签名证书与 FLUXBOT_KEY_ALIAS 不匹配"
+            echo "APK cert: ${CERT_SHA:-<none>}"
+            echo "keystore cert: ${EXPECTED_SHA:-<none>}"
+            exit 1
+          fi
+          echo "release APK 已使用 secret 中的正式密钥签名（SHA-256 ${CERT_SHA}）"
+
+      - name: Compute release artifact name
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release' }}
+        # 分支名里的 '/' 等字符不能出现在 artifact 名中，替换为 '-'。
+        run: |
+          echo "SHORT_SHA=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+          echo "SAFE_REF=$(printf '%s' "$GITHUB_REF_NAME" | sed 's/[^A-Za-z0-9._-]/-/g')" >> "$GITHUB_ENV"
+
+      - name: Stage release checksum
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release' }}
+        run: |
+          APK="app/build/outputs/apk/release/app-release.apk"
+          cp "$APK" app-release.apk
+          sha256sum app-release.apk | awk '{print $1"  app-release.apk"}' > app-release.apk.sha256
+
       - name: Upload debug APK
-        if: startsWith(github.ref, 'refs/heads/') && github.event_name != 'pull_request'
+        if: ${{ startsWith(github.ref, 'refs/heads/') && github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release') }}
         uses: actions/upload-artifact@v4
         with:
           name: fluxbot-debug-${{ github.ref_name }}
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # 手动 release 只挂 artifact，不创建 GitHub Release；tag 发版逻辑保持不变。
+      - name: Upload dispatch release APK
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxbot-release-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
+          path: |
+            app-release.apk
+            app-release.apk.sha256
+            app/build/outputs/mapping/release/mapping.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -105,7 +177,7 @@ jobs:
       # Release 资产走 objects.githubusercontent.com，下载速度远高于 Actions artifact；
       # deploy/release.sh 就从这里取包再镜像给 B 机。
       - name: Publish APK to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: ${{ github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

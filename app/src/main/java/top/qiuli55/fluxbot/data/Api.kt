@@ -52,6 +52,8 @@ data class RemoteMessage(
     val component: ComponentNode? = null,
     val fallbackText: String = "",
     val createdAt: String = "",
+    /** 服务端 payload 的扁平化副本（子任务状态 / 决策结果等内联卡片用）。 */
+    val payload: Map<String, String> = emptyMap(),
 ) {
     fun displayText(): String = content.ifBlank { fallbackText }
 }
@@ -81,7 +83,24 @@ internal fun parseRemoteMessage(o: JSONObject): RemoteMessage? {
         component = envelope?.root,
         fallbackText = envelope?.fallbackText.orEmpty(),
         createdAt = o.optStringOrEmpty("created_at"),
+        payload = flattenPayload(payload),
     )
+}
+
+/** payload 里的嵌套对象（如 decision）序列化成字符串，卡片只做展示。 */
+internal fun flattenPayload(payload: JSONObject?): Map<String, String> {
+    if (payload == null) return emptyMap()
+    val result = LinkedHashMap<String, String>()
+    payload.keys().forEach { key ->
+        when (val value = payload.opt(key)) {
+            null, JSONObject.NULL -> Unit
+            is String -> if (value.isNotBlank()) result[key] = value
+            is JSONObject -> result[key] = value.toString()
+            is JSONArray -> result[key] = value.toString()
+            else -> result[key] = value.toString()
+        }
+    }
+    return result
 }
 
 /** 云端密钥库提供的一个可选模型；keyId 空表示运行时原生模型。 */
@@ -105,6 +124,8 @@ data class PendingDecision(
     val detail: String,
     val options: List<String>,
     val kind: String,
+    /** 决策 meta：command / channel / draft_id / chat_id 等展示字段。 */
+    val meta: Map<String, String> = emptyMap(),
 )
 
 /** 远端 Bot 的一条长期记忆。 */
@@ -159,6 +180,10 @@ data class RemoteConnector(
     val avatarUrl: String,
     val scopes: List<String>,
     val connectedAt: String,
+    /** calendar 专有：ics / caldav，未连接时为空。 */
+    val mode: String = "",
+    /** calendar 专有：脱敏后的主机名（不含完整 URL）。 */
+    val host: String = "",
 )
 
 /** 设备码登录的起始信息：用户在浏览器里输入 userCode 并授权。 */
@@ -837,7 +862,7 @@ class Api(context: Context) {
 
     // ---------- 底层请求 ----------
 
-    private fun request(
+    internal fun request(
         method: String,
         path: String,
         body: JSONObject?,
@@ -880,7 +905,7 @@ class Api(context: Context) {
         }
     }
 
-    private fun parseConnector(o: JSONObject): RemoteConnector {
+    internal fun parseConnector(o: JSONObject): RemoteConnector {
         val scopes = o.optJSONArray("scopes") ?: JSONArray()
         return RemoteConnector(
             id = o.optStringOrEmpty("id"),
@@ -892,6 +917,8 @@ class Api(context: Context) {
             avatarUrl = o.optStringOrEmpty("avatar_url"),
             scopes = (0 until scopes.length()).map { scopes.optString(it) },
             connectedAt = o.optStringOrEmpty("connected_at"),
+            mode = o.optStringOrEmpty("mode"),
+            host = o.optStringOrEmpty("host"),
         )
     }
 
@@ -906,7 +933,7 @@ class Api(context: Context) {
     )
 
     /** 后端列表接口通常把数组放在 data 里；也兼容 data 对象内再包一层。 */
-    private fun JSONObject.dataArray(): JSONArray {
+    internal fun JSONObject.dataArray(): JSONArray {
         optJSONArray("data")?.let { return it }
         val obj = optJSONObject("data") ?: return JSONArray()
         return obj.optJSONArray("tasks")
@@ -937,6 +964,7 @@ class Api(context: Context) {
             detail = o.optStringOrEmpty("context"),
             options = options,
             kind = o.optStringOrEmpty("kind"),
+            meta = flattenPayload(o.optJSONObject("meta")),
         )
     }
 
@@ -994,7 +1022,7 @@ class Api(context: Context) {
         )
     }
 
-    private fun displayTime(raw: String): String {
+    internal fun displayTime(raw: String): String {
         if (raw.isBlank()) return ""
         return raw.replace('T', ' ').removeSuffix("Z").take(16)
     }

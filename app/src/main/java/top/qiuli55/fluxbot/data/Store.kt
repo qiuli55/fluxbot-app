@@ -115,8 +115,13 @@ class Store(context: Context) {
         text: String,
         card: TaskCard? = null,
         sender: String? = null,
+        kind: String = "",
+        payload: Map<String, String> = emptyMap(),
     ): Message {
-        val m = Message("m-${System.nanoTime()}", role, text, clock(), card, sender)
+        val m = Message(
+            "m-${System.nanoTime()}", role, text, clock(), card, sender,
+            kind = kind, payload = payload,
+        )
         updateBot(botId) {
             val prefix = if (role == "bot" && sender != null) "$sender：" else ""
             it.copy(

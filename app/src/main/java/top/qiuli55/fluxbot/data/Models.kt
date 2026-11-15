@@ -29,6 +29,8 @@ data class Message(
     val kind: String = "",
     /** 组件不可解析时的纯文本兜底。 */
     val fallbackText: String = "",
+    /** 服务端 payload 的展示副本（子任务 / 决策结果 / 例程创建卡片）。 */
+    val payload: Map<String, String> = emptyMap(),
 ) {
     /** 组件缺失 / 解析失败时真正展示的文本。 */
     fun displayText(): String = text.ifBlank { fallbackText }
@@ -146,6 +148,7 @@ fun Message.toJson() = JSONObject()
         component?.let { put("component", it.toJson()) }
         if (kind.isNotEmpty()) put("kind", kind)
         if (fallbackText.isNotEmpty()) put("fallbackText", fallbackText)
+        if (payload.isNotEmpty()) put("payload", JSONObject(payload))
     }
 
 fun messageFromJson(o: JSONObject) = Message(
@@ -155,6 +158,9 @@ fun messageFromJson(o: JSONObject) = Message(
     o.optJSONObject("component")?.let { parseComponentNode(it) },
     o.optString("kind"),
     o.optString("fallbackText"),
+    o.optJSONObject("payload")?.let { p ->
+        p.keys().asSequence().associateWith { key -> p.optString(key) }
+    } ?: emptyMap(),
 )
 
 fun Memory.toJson() = JSONObject().put("id", id).put("text", text).put("source", source).put("ts", ts)

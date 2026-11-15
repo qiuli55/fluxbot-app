@@ -8,7 +8,7 @@ import org.json.JSONObject
  *
  * 只占一个键，退出登录时删除这一个键即可保证令牌不残留。
  */
-class SecureCloudTokenStore(private val secure: SecureStore) : CloudTokenStore {
+class SecureCloudTokenStore(private val secure: SecretStore) : CloudTokenStore {
 
     override fun load(): CloudSession? {
         val raw = secure.get(KEY) ?: return null

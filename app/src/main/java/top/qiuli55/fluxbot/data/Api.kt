@@ -8,12 +8,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
 import java.io.IOException
 import java.net.ConnectException
-import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
-import java.net.URL
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
 
@@ -218,10 +215,18 @@ internal fun JSONObject.optStringOrEmpty(key: String): String =
  *
  * 服务器地址存在普通 SharedPreferences；访问令牌属于登录态，按账号用 Keystore 加密保存。
  */
-class Api(context: Context, private val cloud: CloudAuthManager? = null) {
+class Api internal constructor(
+    private val prefs: KeyValueStore,
+    private val secure: SecretStore,
+    private val cloud: CloudAuthManager? = null,
+) {
 
-    private val prefs = context.getSharedPreferences("fluxbot.api", Context.MODE_PRIVATE)
-    private val secure = SecureStore(context)
+    /** 生产入口：普通设置走 SharedPreferences，令牌走 Keystore 加密的 SecureStore。 */
+    constructor(context: Context, cloud: CloudAuthManager? = null) : this(
+        SharedPrefsKeyValueStore(context.getSharedPreferences("fluxbot.api", Context.MODE_PRIVATE)),
+        SecureStore(context),
+        cloud,
+    )
 
     /** 当前账号；令牌按账号隔离，切账号时由 Store 更新。 */
     var accountId: String? = null
@@ -249,28 +254,28 @@ class Api(context: Context, private val cloud: CloudAuthManager? = null) {
 
     var baseUrl: String
         get() {
-            val saved = prefs.getString("base_url", null)?.trim()?.trimEnd('/')
+            val saved = prefs.getString("base_url")?.trim()?.trimEnd('/')
             // 旧的 InstaBox 裸域名在国内被 DNS 污染，自动迁移到 flux.qiuli55.top 反代
             if (saved.isNullOrEmpty() || saved.contains("instabox.tech")) return DEFAULT_BASE_URL
             return saved
         }
         set(value) {
-            prefs.edit().putString("base_url", value.trim().trimEnd('/')).apply()
+            prefs.putString("base_url", value.trim().trimEnd('/'))
         }
 
     var token: String
         get() = secure.get(tokenKey) ?: secure.get(SYS_TOKEN_KEY) ?: migrateLegacyToken() ?: ""
         set(value) {
             secure.put(tokenKey, value.trim())
-            prefs.edit().remove("token").apply()
+            prefs.remove("token")
         }
 
     /** 旧版本把令牌明文放在 SharedPreferences 里，读到后立刻迁进 Keystore 并清掉明文。 */
     private fun migrateLegacyToken(): String? {
-        val old = prefs.getString("token", null)?.trim().orEmpty()
+        val old = prefs.getString("token")?.trim().orEmpty()
         if (old.isEmpty()) return null
         secure.put(SYS_TOKEN_KEY, old)
-        prefs.edit().remove("token").apply()
+        prefs.remove("token")
         return old
     }
 
@@ -807,10 +812,10 @@ class Api(context: Context, private val cloud: CloudAuthManager? = null) {
     }
 
     /**
-     * 更新定时任务，优先用 PATCH（后端目前没有等价的 POST 更新入口）。
+     * 更新定时任务，用 PATCH（后端目前没有等价的 POST 更新入口）。
      *
-     * Android 上 HttpURLConnection 对 PATCH 的支持并不总是可靠；这里不伪造一个
-     * 不存在的 POST 接口，方法被拒时会原样抛出，由界面 toast 提示。
+     * HttpURLConnection 不接受 PATCH，[requestOnce] 会自动改用
+     * [RawHttpTransport] 发请求，所以手机和 JVM 上都能真正更新。
      */
     suspend fun updateRoutine(
         botId: String,
@@ -919,41 +924,40 @@ class Api(context: Context, private val cloud: CloudAuthManager? = null) {
         timeoutMs: Int,
         bearer: String,
     ): JSONObject {
-        val conn = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = 15_000
-            readTimeout = timeoutMs
-            setRequestProperty("Accept", "application/json")
-            if (bearer.isNotBlank()) setRequestProperty("Authorization", "Bearer $bearer")
-            // 本地账号隔离：服务端用它区分连接器记录（将来接真实登录后改为令牌 subject）
-            accountId?.takeIf { it.isNotBlank() }?.let {
-                setRequestProperty("X-Flux-Account", it)
-            }
+        val headers = LinkedHashMap<String, String>()
+        headers["Accept"] = "application/json"
+        if (bearer.isNotBlank()) headers["Authorization"] = "Bearer $bearer"
+        // 本地账号隔离：服务端用它区分连接器记录（将来接真实登录后改为令牌 subject）
+        accountId?.takeIf { it.isNotBlank() }?.let { headers["X-Flux-Account"] = it }
+        val payload = body?.toString()
+        if (payload != null) headers["Content-Type"] = "application/json; charset=utf-8"
+        val request = HttpRequest(
+            method = method,
+            url = baseUrl + path,
+            body = payload,
+            headers = headers,
+            timeoutMs = timeoutMs,
+            connectTimeoutMs = 15_000,
+        )
+        // HttpURLConnection 不支持 PATCH（JDK / Android 都会直接拒绝），改用最小 socket 实现。
+        val transport: HttpTransport =
+            if (method.equals("PATCH", ignoreCase = true)) RawHttpTransport()
+            else UrlConnectionHttpTransport()
+        val response = transport.execute(request)
+        val code = response.code
+        val text = response.body
+        if (text.isBlank() && code in 200..299) {
+            return JSONObject().put("success", true)
         }
-        try {
-            if (body != null) {
-                conn.doOutput = true
-                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-            }
-            val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val text = stream?.bufferedReader()?.use(BufferedReader::readText).orEmpty()
-            if (text.isBlank() && code in 200..299) {
-                return JSONObject().put("success", true)
-            }
-            val root = runCatching { JSONObject(text) }.getOrElse {
-                throw ApiException("服务器返回异常（HTTP $code）", code)
-            }
-            val success = root.optBoolean("success", code in 200..299)
-            if (code !in 200..299 || !success) {
-                val msg = root.optStringOrEmpty("message").ifEmpty { "请求失败（HTTP $code）" }
-                throw ApiException(msg, code, root.optStringOrEmpty("code"))
-            }
-            return root
-        } finally {
-            conn.disconnect()
+        val root = runCatching { JSONObject(text) }.getOrElse {
+            throw ApiException("服务器返回异常（HTTP $code）", code)
         }
+        val success = root.optBoolean("success", code in 200..299)
+        if (code !in 200..299 || !success) {
+            val msg = root.optStringOrEmpty("message").ifEmpty { "请求失败（HTTP $code）" }
+            throw ApiException(msg, code, root.optStringOrEmpty("code"))
+        }
+        return root
     }
 
     internal fun parseConnector(o: JSONObject): RemoteConnector {

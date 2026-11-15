@@ -1,5 +1,6 @@
 package top.qiuli55.fluxbot.nav
 
+import android.os.Build
 import android.view.HapticFeedbackConstants
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -8,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -35,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -52,14 +55,24 @@ import top.qiuli55.fluxbot.screens.ApprovalRulesScreen
 import top.qiuli55.fluxbot.screens.AppsScreen
 import top.qiuli55.fluxbot.screens.AuthScreen
 import top.qiuli55.fluxbot.screens.BotScreen
+import top.qiuli55.fluxbot.screens.BrowserScreen
+import top.qiuli55.fluxbot.screens.CalendarConnectorScreen
+import top.qiuli55.fluxbot.screens.ChannelsScreen
 import top.qiuli55.fluxbot.screens.ChatScreen
 import top.qiuli55.fluxbot.screens.CreateScreen
 import top.qiuli55.fluxbot.screens.DesktopScreen
+import top.qiuli55.fluxbot.screens.EmailConnectorScreen
 import top.qiuli55.fluxbot.screens.HomeScreen
 import top.qiuli55.fluxbot.screens.LibraryScreen
 import top.qiuli55.fluxbot.screens.LocalMediaLoader
 import top.qiuli55.fluxbot.screens.MemoryScreen
+import top.qiuli55.fluxbot.screens.OutboundDraftsScreen
+import top.qiuli55.fluxbot.screens.PageDetailScreen
+import top.qiuli55.fluxbot.screens.PagesScreen
 import top.qiuli55.fluxbot.screens.SettingsScreen
+import top.qiuli55.fluxbot.screens.SharedMemoryScreen
+import top.qiuli55.fluxbot.screens.SkillDetailScreen
+import top.qiuli55.fluxbot.screens.SkillsScreen
 import top.qiuli55.fluxbot.screens.VaultScreen
 import top.qiuli55.fluxbot.ui.Flux
 
@@ -68,7 +81,7 @@ sealed interface Route {
     data object Home : Route
     data object Create : Route
     data class Chat(val botId: String) : Route
-    data class BotDetail(val botId: String) : Route
+    data class BotDetail(val botId: String, val tab: Int = 0) : Route
     data class BotDesktop(val botId: String) : Route
     data class Library(val botId: String) : Route
     data object Settings : Route
@@ -77,6 +90,16 @@ sealed interface Route {
     data object Vault : Route
     data object Apps : Route
     data object MemoryImport : Route
+    data object OutboundDrafts : Route
+    data object Skills : Route
+    data class SkillDetail(val skillId: String) : Route
+    data object Channels : Route
+    data object Browser : Route
+    data object SharedMemory : Route
+    data object Pages : Route
+    data class PageDetail(val pageId: String) : Route
+    data object EmailConnector : Route
+    data object CalendarConnector : Route
 }
 
 val LocalUi = staticCompositionLocalOf<AppUi> { error("AppUi not provided") }
@@ -100,6 +123,10 @@ class AppUi(val store: Store) {
     var sheet by mutableStateOf<Sheet?>(null)
 
     var toast by mutableStateOf<String?>(null)
+        private set
+
+    /** 数据版本：底部面板改完数据后自增，页面据此重新拉取。 */
+    var dataRevision by mutableStateOf(0)
         private set
 
     var onHaptic: (() -> Unit)? = null
@@ -143,6 +170,10 @@ class AppUi(val store: Store) {
     fun closeSheet() {
         sheet = null
     }
+
+    fun refreshData() {
+        dataRevision++
+    }
 }
 
 @Composable
@@ -156,6 +187,18 @@ fun FluxApp(store: Store) {
     }
     SideEffect {
         ui.onHaptic = { view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
+    }
+
+    // 底部面板打开时对页面内容做真实模糊（Android 12+ 的 RenderEffect）。
+    val blurRadius by animateDpAsState(
+        targetValue = if (ui.sheet != null) 18.dp else 0.dp,
+        animationSpec = tween(220),
+        label = "sheetBlur",
+    )
+    val contentBlur = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        Modifier.blur(blurRadius)
+    } else {
+        Modifier
     }
 
     val loggedIn = store.state.loggedIn
@@ -210,14 +253,14 @@ fun FluxApp(store: Store) {
                         (enter + fadeIn(tween(160))) togetherWith (exit + fadeOut(tween(160)))
                     },
                     label = "route",
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().then(contentBlur),
                 ) { route ->
                     when (route) {
                         Route.Login -> AuthScreen()
                         Route.Home -> HomeScreen()
                         Route.Create -> CreateScreen()
                         is Route.Chat -> ChatScreen(route.botId)
-                        is Route.BotDetail -> BotScreen(route.botId)
+                        is Route.BotDetail -> BotScreen(route.botId, route.tab)
                         is Route.BotDesktop -> DesktopScreen(route.botId)
                         is Route.Library -> LibraryScreen(route.botId)
                         Route.Settings -> SettingsScreen()
@@ -226,6 +269,16 @@ fun FluxApp(store: Store) {
                         Route.Vault -> VaultScreen()
                         Route.Apps -> AppsScreen()
                         Route.MemoryImport -> MemoryScreen()
+                        Route.OutboundDrafts -> OutboundDraftsScreen()
+                        Route.Skills -> SkillsScreen()
+                        is Route.SkillDetail -> SkillDetailScreen(route.skillId)
+                        Route.Channels -> ChannelsScreen()
+                        Route.Browser -> BrowserScreen()
+                        Route.SharedMemory -> SharedMemoryScreen()
+                        Route.Pages -> PagesScreen()
+                        is Route.PageDetail -> PageDetailScreen(route.pageId)
+                        Route.EmailConnector -> EmailConnectorScreen()
+                        Route.CalendarConnector -> CalendarConnectorScreen()
                     }
                 }
 

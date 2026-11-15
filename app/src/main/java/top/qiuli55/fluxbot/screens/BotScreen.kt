@@ -35,7 +35,6 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Bot
-import top.qiuli55.fluxbot.data.RemoteTask
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Route
@@ -52,7 +51,7 @@ import top.qiuli55.fluxbot.ui.Pill
 import top.qiuli55.fluxbot.ui.SegTabs
 import top.qiuli55.fluxbot.ui.TabHint
 
-private val TABS = listOf("记忆", "定时任务", "设置")
+private val TABS = listOf("记忆", "例程", "子任务", "设置")
 
 private fun permissionText(perms: Map<String, Boolean>): String {
     val names = listOf("files" to "文件", "shell" to "命令", "network" to "网络", "apps" to "应用")
@@ -61,11 +60,11 @@ private fun permissionText(perms: Map<String, Boolean>): String {
 }
 
 @Composable
-fun BotScreen(botId: String) {
+fun BotScreen(botId: String, initialTab: Int = 0) {
     val store = LocalStore.current
     val ui = LocalUi.current
     val bot = store.bot(botId)
-    var tab by remember(botId) { mutableIntStateOf(0) }
+    var tab by remember(botId) { mutableIntStateOf(initialTab.coerceIn(0, TABS.lastIndex)) }
 
     Column(Modifier.fillMaxSize().background(Flux.bg)) {
         if (bot == null) {
@@ -120,6 +119,7 @@ fun BotScreen(botId: String) {
             when (tab) {
                 0 -> MemoryPane(bot)
                 1 -> RoutinePane(bot)
+                2 -> SubtaskPane(bot)
                 else -> SettingsPane(bot)
             }
         }
@@ -193,188 +193,6 @@ private fun MemoryPane(bot: Bot) {
     FluxCard {
         AddRow("添加记忆") { ui.sheet = Sheet.MemoryAdd(bot.id) }
     }
-}
-
-/* ---------------- 定时任务 ---------------- */
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun RoutinePane(bot: Bot) {
-    val store = LocalStore.current
-    val ui = LocalUi.current
-    var loading by remember(bot.id, bot.remote) { mutableStateOf(bot.remote) }
-    var tasks by remember(bot.id, bot.remote) { mutableStateOf<List<RemoteTask>>(emptyList()) }
-    var tasksLoading by remember(bot.id, bot.remote) { mutableStateOf(bot.remote) }
-
-    LaunchedEffect(bot.id, bot.remote) {
-        if (!bot.remote) return@LaunchedEffect
-        loading = true
-        try {
-            store.refreshBotRoutines(bot.id)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            ui.showToast(e.message ?: "定时任务加载失败")
-        } finally {
-            loading = false
-        }
-        tasksLoading = true
-        try {
-            tasks = store.api.listTasks(bot.id)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            ui.showToast(e.message ?: "运行记录加载失败")
-        } finally {
-            tasksLoading = false
-        }
-    }
-
-    TabHint(
-        if (loading) "加载中…"
-        else "到点自动开工。Bot 忙的时候会排队，不会打断正在跑的任务。",
-    )
-    if (loading) {
-        EmptyCard("加载中…")
-    } else if (bot.routines.isEmpty()) {
-        EmptyCard("还没有定时任务。\n比如每天早上汇总新闻，或者每周一生成周报。")
-    } else {
-        FluxCard {
-            bot.routines.forEachIndexed { i, r ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .combinedClickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = {},
-                            onLongClick = {
-                                ui.haptic(10)
-                                ui.sheet = Sheet.Confirm(
-                                    title = "删除定时任务？",
-                                    text = "「${r.title}」将不再自动执行，无法恢复。",
-                                    action = "删除",
-                                    danger = true,
-                                ) {
-                                    if (bot.remote) {
-                                        ui.scope.launch {
-                                            try {
-                                                store.api.deleteRoutine(bot.id, r.id)
-                                                store.refreshBotRoutines(bot.id)
-                                                ui.showToast("定时任务已删除")
-                                            } catch (e: CancellationException) {
-                                                throw e
-                                            } catch (e: Exception) {
-                                                ui.showToast(e.message ?: "删除失败")
-                                            }
-                                        }
-                                    } else {
-                                        store.deleteRoutine(bot.id, r.id)
-                                        ui.showToast("定时任务已删除")
-                                    }
-                                }
-                            },
-                        )
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(r.title, fontSize = 14.sp, fontWeight = FontWeight(460), color = Flux.text)
-                        Spacer(Modifier.height(3.dp))
-                        Text("${r.freq} · ${r.time} · 时区 Asia/Shanghai", fontSize = 11.5.sp, color = Flux.text3)
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    FluxSwitch(r.enabled) {
-                        ui.haptic(8)
-                        if (bot.remote) {
-                            ui.scope.launch {
-                                try {
-                                    store.api.updateRoutine(bot.id, r.id, enabled = !r.enabled)
-                                    store.refreshBotRoutines(bot.id)
-                                    ui.showToast(if (r.enabled) "定时任务已暂停" else "定时任务已开启")
-                                } catch (e: CancellationException) {
-                                    throw e
-                                } catch (e: Exception) {
-                                    ui.showToast(e.message ?: "更新失败")
-                                }
-                            }
-                        } else {
-                            store.toggleRoutine(bot.id, r.id)
-                            ui.showToast(if (r.enabled) "定时任务已暂停" else "定时任务已开启")
-                        }
-                    }
-                }
-                if (i != bot.routines.lastIndex) Hairline()
-            }
-        }
-    }
-    Spacer(Modifier.height(12.dp))
-    FluxCard {
-        AddRow("新建定时任务") { ui.sheet = Sheet.RoutineAdd(bot.id) }
-    }
-
-    Spacer(Modifier.height(20.dp))
-    TabHint("运行记录 · 最近 50 条")
-    when {
-        tasksLoading -> EmptyCard("加载中…")
-        tasks.isEmpty() -> EmptyCard("还没有运行记录。")
-        else -> FluxCard {
-            tasks.forEachIndexed { i, t ->
-                Column(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            t.title,
-                            fontSize = 13.5.sp,
-                            fontWeight = FontWeight(460),
-                            color = Flux.text,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Pill(taskStatusText(t.status), taskStatusColor(t.status))
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        listOf(t.createdAt, t.finishedAt)
-                            .filter { it.isNotBlank() }
-                            .joinToString(" → ")
-                            .ifBlank { "—" },
-                        fontSize = 11.sp,
-                        color = Flux.text4,
-                    )
-                    if (t.error.isNotBlank()) {
-                        Text(
-                            t.error,
-                            fontSize = 11.sp,
-                            color = Flux.danger,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                    }
-                }
-                if (i != tasks.lastIndex) Hairline()
-            }
-        }
-    }
-}
-
-private fun taskStatusText(status: String): String = when (status) {
-    "completed", "succeeded", "success" -> "已完成"
-    "failed", "error" -> "失败"
-    "running", "executing" -> "运行中"
-    "queued", "pending", "waiting_for_user_decision" -> "等待中"
-    "cancelled", "canceled" -> "已取消"
-    else -> status.ifBlank { "未知" }
-}
-
-private fun taskStatusColor(status: String) = when (status) {
-    "completed", "succeeded", "success" -> Flux.accent
-    "failed", "error" -> Flux.danger
-    else -> Flux.text3
 }
 
 /* ---------------- 设置 ---------------- */

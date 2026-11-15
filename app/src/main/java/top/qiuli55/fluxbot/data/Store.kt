@@ -34,7 +34,11 @@ class Store(context: Context) {
         onSessionExpired = { onCloudSessionExpired() },
     )
 
-    val api = Api(appContext, cloud)
+    val api = Api(
+        appContext,
+        cloud,
+        logger = { message -> Log.d("FluxBot/Api", message) },
+    )
 
     var state by mutableStateOf(load() ?: DemoData.seed())
         private set

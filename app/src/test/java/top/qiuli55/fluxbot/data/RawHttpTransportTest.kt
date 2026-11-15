@@ -17,9 +17,10 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * PATCH 回退传输的回归测试。
  *
- * HttpURLConnection 在 JDK 与 Android 上都会拒绝 PATCH，之前所有依赖 PATCH 的
- * 写操作（暂停例程 / 改技能 / 改页面）都会在发请求前直接失败。这里用本地
- * 原始 socket 服务器验证回退实现真的发出了 PATCH，并能解析定长与 chunked 响应。
+ * Android 的 HttpURLConnection 接受 PATCH，手机上的写操作（暂停例程 / 改技能 /
+ * 改页面）走系统实现；只有桌面 JVM 会抛 ProtocolException 并回退到这里。本测试
+ * 用本地原始 socket 服务器验证回退实现真的发出了 PATCH，并能解析定长与 chunked
+ * 响应。
  *
  * 不用 com.sun.net.httpserver，因为它不在 Android 单测的编译类路径上。
  */

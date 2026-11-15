@@ -6,9 +6,11 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
+import java.net.ProtocolException
 import java.net.Socket
 import java.net.URI
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
@@ -40,14 +42,14 @@ interface HttpTransport {
 class UrlConnectionHttpTransport : HttpTransport {
 
     override fun execute(request: HttpRequest): HttpResponse {
-        val conn = (URL(request.url).openConnection() as HttpURLConnection).apply {
-            requestMethod = request.method
-            connectTimeout = request.connectTimeoutMs
-            readTimeout = request.timeoutMs
-            instanceFollowRedirects = false
-            request.headers.forEach { (name, value) -> setRequestProperty(name, value) }
-        }
+        val conn = URL(request.url).openConnection() as HttpURLConnection
         try {
+            // Android 接受 PATCH；桌面 JDK 会在这里抛 ProtocolException，交给调用方决定是否回退。
+            conn.requestMethod = request.method
+            conn.connectTimeout = request.connectTimeoutMs
+            conn.readTimeout = request.timeoutMs
+            conn.instanceFollowRedirects = false
+            request.headers.forEach { (name, value) -> conn.setRequestProperty(name, value) }
             if (request.body != null) {
                 conn.doOutput = true
                 conn.outputStream.use { it.write(request.body.toByteArray(Charsets.UTF_8)) }
@@ -63,12 +65,38 @@ class UrlConnectionHttpTransport : HttpTransport {
 }
 
 /**
- * PATCH 的回退实现。
+ * PATCH 的传输选择：优先系统 HttpURLConnection，仅在 JVM 拒绝时回退。
  *
- * JDK 与 Android 的 HttpURLConnection 都会在 setRequestMethod 阶段直接拒绝
- * PATCH（ProtocolException: Invalid HTTP method），导致暂停例程 / 修改技能等
- * 写操作在手机上必定失败。这里用一次性的 socket 请求补上：HTTP/1.1、
- * Connection: close，按 Content-Length 或 chunked 读取响应。
+ * Android 的 HttpURLConnection 接受 PATCH，所以手机上始终走系统实现，代理、
+ * TLS 与重定向都由系统处理。桌面 JDK 的 setRequestMethod("PATCH") 会抛
+ * [ProtocolException]，只有这种异常才改用 [RawHttpTransport]；回退日志只记
+ * 一次，避免每次 PATCH 都刷屏。
+ */
+class PatchFallbackHttpTransport(
+    private val primary: HttpTransport = UrlConnectionHttpTransport(),
+    private val fallback: HttpTransport = RawHttpTransport(),
+    private val logger: (String) -> Unit = {},
+) : HttpTransport {
+
+    private val fallbackLogged = AtomicBoolean(false)
+
+    override fun execute(request: HttpRequest): HttpResponse =
+        try {
+            primary.execute(request)
+        } catch (e: ProtocolException) {
+            if (fallbackLogged.compareAndSet(false, true)) {
+                logger("PATCH rejected by HttpURLConnection (${e.message}); raw socket fallback")
+            }
+            fallback.execute(request)
+        }
+}
+
+/**
+ * 给 [PatchFallbackHttpTransport] 使用的原始 socket 回退。
+ *
+ * Android 的 HttpURLConnection 本身接受 PATCH，手机上不会走到这里；只有桌面
+ * JDK 在 setRequestMethod 阶段抛出 ProtocolException 时才用一次性 socket
+ * 请求补上：HTTP/1.1、Connection: close，按 Content-Length 或 chunked 读取响应。
  *
  * 只处理没有重定向的普通 JSON 接口；HTTPS 走默认信任库并开启主机名校验。
  */

@@ -219,13 +219,29 @@ class Api internal constructor(
     private val prefs: KeyValueStore,
     private val secure: SecretStore,
     private val cloud: CloudAuthManager? = null,
+    private val logger: (String) -> Unit = {},
 ) {
 
     /** 生产入口：普通设置走 SharedPreferences，令牌走 Keystore 加密的 SecureStore。 */
-    constructor(context: Context, cloud: CloudAuthManager? = null) : this(
+    constructor(
+        context: Context,
+        cloud: CloudAuthManager? = null,
+        logger: (String) -> Unit = {},
+    ) : this(
         SharedPrefsKeyValueStore(context.getSharedPreferences("fluxbot.api", Context.MODE_PRIVATE)),
         SecureStore(context),
         cloud,
+        logger,
+    )
+
+    /** 默认请求栈：系统 HttpURLConnection（Android 上支持 PATCH）。 */
+    private val systemTransport: HttpTransport = UrlConnectionHttpTransport()
+
+    /** PATCH 专用：系统实现拒绝时（桌面 JVM）才回退到原始 socket。 */
+    private val patchTransport: HttpTransport = PatchFallbackHttpTransport(
+        primary = systemTransport,
+        fallback = RawHttpTransport(),
+        logger = logger,
     )
 
     /** 当前账号；令牌按账号隔离，切账号时由 Store 更新。 */
@@ -814,8 +830,8 @@ class Api internal constructor(
     /**
      * 更新定时任务，用 PATCH（后端目前没有等价的 POST 更新入口）。
      *
-     * HttpURLConnection 不接受 PATCH，[requestOnce] 会自动改用
-     * [RawHttpTransport] 发请求，所以手机和 JVM 上都能真正更新。
+     * PATCH 默认走系统 HttpURLConnection（Android 接受 PATCH）；只有桌面 JVM
+     * 的 setRequestMethod 抛出 ProtocolException 时才回退到 [RawHttpTransport]。
      */
     suspend fun updateRoutine(
         botId: String,
@@ -939,10 +955,10 @@ class Api internal constructor(
             timeoutMs = timeoutMs,
             connectTimeoutMs = 15_000,
         )
-        // HttpURLConnection 不支持 PATCH（JDK / Android 都会直接拒绝），改用最小 socket 实现。
+        // PATCH 优先走系统 HttpURLConnection；仅当 JVM 的 setRequestMethod 抛出
+        // ProtocolException 时才回退到最小 socket 实现（Android 不会触发回退）。
         val transport: HttpTransport =
-            if (method.equals("PATCH", ignoreCase = true)) RawHttpTransport()
-            else UrlConnectionHttpTransport()
+            if (method.equals("PATCH", ignoreCase = true)) patchTransport else systemTransport
         val response = transport.execute(request)
         val code = response.code
         val text = response.body

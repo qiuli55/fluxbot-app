@@ -131,7 +131,10 @@ jobs:
 
       - name: Compute release artifact name
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release' }}
-        run: echo "SHORT_SHA=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+        # 分支名里的 '/' 等字符不能出现在 artifact 名中，替换为 '-'。
+        run: |
+          echo "SHORT_SHA=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+          echo "SAFE_REF=$(printf '%s' "$GITHUB_REF_NAME" | sed 's/[^A-Za-z0-9._-]/-/g')" >> "$GITHUB_ENV"
 
       - name: Stage release checksum
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release' }}
@@ -154,7 +157,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release' }}
         uses: actions/upload-artifact@v4
         with:
-          name: fluxbot-release-${{ github.ref_name }}-${{ env.SHORT_SHA }}
+          name: fluxbot-release-${{ env.SAFE_REF }}-${{ env.SHORT_SHA }}
           path: |
             app-release.apk
             app-release.apk.sha256

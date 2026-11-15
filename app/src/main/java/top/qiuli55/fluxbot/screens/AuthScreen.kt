@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -31,7 +33,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import top.qiuli55.fluxbot.data.CloudProviders
 import top.qiuli55.fluxbot.data.CloudValidation
+import top.qiuli55.fluxbot.data.CustomTabsOAuthBrowser
+import top.qiuli55.fluxbot.data.OAuthProvider
+import top.qiuli55.fluxbot.data.OAuthState
 import top.qiuli55.fluxbot.ip.FloAvatar
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
@@ -66,20 +72,71 @@ internal data class AuthFormState(
     }
 }
 
+/** 第三方登录按钮的展示状态；providers 为 null 表示尚未探测，先按可用展示。 */
+internal data class AuthOAuthView(
+    val provider: OAuthProvider? = null,
+    val loading: Boolean = false,
+    val hint: String = "",
+    val providers: CloudProviders? = null,
+) {
+    fun available(target: OAuthProvider): Boolean = when (target) {
+        OAuthProvider.GitHub -> providers?.github != false
+        OAuthProvider.Google -> providers?.google != false
+    }
+}
+
 @Composable
 fun AuthScreen() {
     val store = LocalStore.current
     val ui = LocalUi.current
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val browser = remember(context) { CustomTabsOAuthBrowser(context) }
     var form by remember { mutableStateOf(AuthFormState()) }
+    var oauthView by remember { mutableStateOf(AuthOAuthView()) }
 
     val serverLabel = store.cloudSettings.baseUrl
         .removePrefix("https://")
         .removePrefix("http://")
         .trimEnd('/')
 
+    // 不阻塞首屏：探测失败时保持 null，两个按钮仍按可用展示。
+    LaunchedEffect(Unit) {
+        val available = runCatching { store.cloud.providers() }.getOrNull()
+        if (available != null) {
+            oauthView = oauthView.copy(providers = available)
+        }
+    }
+
+    LaunchedEffect(store.oauthState) {
+        when (val state = store.oauthState) {
+            OAuthState.Idle -> {
+                oauthView = oauthView.copy(provider = null, loading = false, hint = "")
+            }
+            is OAuthState.Starting -> {
+                oauthView = oauthView.copy(
+                    provider = state.provider,
+                    loading = true,
+                    hint = "正在跳转 ${state.provider.label}…",
+                )
+            }
+            is OAuthState.Completing -> {
+                oauthView = oauthView.copy(
+                    provider = state.provider,
+                    loading = true,
+                    hint = "正在完成登录…",
+                )
+            }
+            is OAuthState.Failed -> {
+                oauthView = oauthView.copy(provider = null, loading = false, hint = "")
+                form = form.copy(loading = false, error = state.message)
+                store.consumeOAuthState()
+            }
+        }
+    }
+
     fun submit() {
-        if (form.loading) return
+        if (form.loading || oauthView.loading) return
         if (form.mode == AuthFormState.MODE_LOGIN) {
             val identifierError = CloudValidation.loginIdentifier(form.identifier)
             val passwordError = CloudValidation.loginPassword(form.password)
@@ -139,9 +196,10 @@ fun AuthScreen() {
 
     AuthContent(
         state = form,
+        oauth = oauthView,
         serverLabel = serverLabel,
         onModeChange = { mode ->
-            if (!form.loading) {
+            if (!form.loading && !oauthView.loading) {
                 form = AuthFormState(mode = mode)
             }
         },
@@ -154,7 +212,17 @@ fun AuthScreen() {
         onPasswordChange = { form = form.copy(password = it, passwordError = "") },
         onTogglePassword = { form = form.copy(showPassword = !form.showPassword) },
         onSubmit = { submit() },
-        onDemo = { ui.sheet = Sheet.Login },
+        onOAuth = { provider ->
+            val busy = form.loading || oauthView.loading
+            if (!busy && oauthView.available(provider) && store.oauthState is OAuthState.Idle) {
+                form = form.copy(error = "")
+                val url = store.startOAuth(provider)
+                if (url != null) {
+                    val opened = runCatching { browser.open(url) }.isSuccess
+                    if (!opened) store.onOAuthLaunchFailed(provider)
+                }
+            }
+        },
         onServer = { ui.sheet = Sheet.CloudServer },
     )
 }
@@ -162,6 +230,7 @@ fun AuthScreen() {
 @Composable
 internal fun AuthContent(
     state: AuthFormState,
+    oauth: AuthOAuthView,
     serverLabel: String,
     onModeChange: (Int) -> Unit,
     onIdentifierChange: (String) -> Unit,
@@ -171,10 +240,11 @@ internal fun AuthContent(
     onPasswordChange: (String) -> Unit,
     onTogglePassword: () -> Unit,
     onSubmit: () -> Unit,
-    onDemo: () -> Unit,
+    onOAuth: (OAuthProvider) -> Unit,
     onServer: () -> Unit,
 ) {
     val login = state.mode == AuthFormState.MODE_LOGIN
+    val busy = state.loading || oauth.loading
     Column(
         Modifier
             .fillMaxSize()
@@ -230,7 +300,7 @@ internal fun AuthContent(
         SegTabs(
             items = listOf("登录", "注册"),
             selected = state.mode,
-            onSelect = { if (!state.loading) onModeChange(it) },
+            onSelect = { if (!busy) onModeChange(it) },
         )
         Spacer(Modifier.height(16.dp))
 
@@ -320,12 +390,35 @@ internal fun AuthContent(
                 login -> "登录"
                 else -> "注册并登录"
             },
-            enabled = !state.loading,
+            enabled = !busy,
             onClick = onSubmit,
         )
         Spacer(Modifier.height(10.dp))
-        SecondaryButton("使用演示账户") {
-            if (!state.loading) onDemo()
+        ProviderLoginButton(
+            label = "GitHub 登录",
+            provider = OAuthProvider.GitHub,
+            oauth = oauth,
+            busy = busy,
+            onOAuth = onOAuth,
+        )
+        Spacer(Modifier.height(10.dp))
+        ProviderLoginButton(
+            label = "Google 登录",
+            provider = OAuthProvider.Google,
+            oauth = oauth,
+            busy = busy,
+            onOAuth = onOAuth,
+        )
+        if (oauth.hint.isNotBlank()) {
+            Text(
+                oauth.hint,
+                fontSize = 12.sp,
+                color = Flux.text3,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp),
+            )
         }
 
         Spacer(Modifier.height(16.dp))
@@ -349,6 +442,24 @@ internal fun AuthContent(
                 .fillMaxWidth()
                 .padding(top = 10.dp, bottom = 22.dp),
         )
+    }
+}
+
+@Composable
+private fun ProviderLoginButton(
+    label: String,
+    provider: OAuthProvider,
+    oauth: AuthOAuthView,
+    busy: Boolean,
+    onOAuth: (OAuthProvider) -> Unit,
+) {
+    val available = oauth.available(provider)
+    val enabled = !busy && available
+    SecondaryButton(
+        text = if (available) label else "$label · 暂不可用",
+        enabled = enabled,
+    ) {
+        if (enabled) onOAuth(provider)
     }
 }
 

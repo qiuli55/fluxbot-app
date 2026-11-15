@@ -60,6 +60,13 @@ class CloudAuthManager(
         adopt(client.login(identifier, password), "login")
 
     /**
+     * 第三方登录兑换成功后，与密码登录共用同一套持久化、提前刷新与 401 单飞刷新。
+     * 日志只记 user_id，不记 code / verifier / 令牌。
+     */
+    suspend fun exchangeOAuth(code: String, codeVerifier: String): CloudSession =
+        adopt(client.exchange(code, codeVerifier), "oauth")
+
+    /**
      * 注册后立刻用同一组凭据登录：注册接口只下发 Cookie，响应体里没有令牌。
      * 注册成功但自动登录失败时，保留“账号已创建”的信息提示用户去登录。
      */

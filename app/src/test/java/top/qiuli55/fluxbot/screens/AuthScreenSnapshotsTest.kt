@@ -17,6 +17,8 @@ import com.android.resources.ScreenOrientation
 import org.junit.Rule
 import org.junit.Test
 import top.qiuli55.fluxbot.R
+import top.qiuli55.fluxbot.data.CloudProviders
+import top.qiuli55.fluxbot.data.OAuthProvider
 import top.qiuli55.fluxbot.ui.Flux
 import top.qiuli55.fluxbot.ui.FluxTheme
 
@@ -45,7 +47,11 @@ class AuthScreenSnapshotsTest {
 
     private val chinese = FontFamily(Font(R.font.noto_sans_sc))
 
-    private fun page(name: String, state: AuthFormState) {
+    private fun page(
+        name: String,
+        state: AuthFormState,
+        oauth: AuthOAuthView = AuthOAuthView(),
+    ) {
         paparazzi.snapshot(name = name) {
             FluxTheme {
                 val base = LocalTextStyle.current
@@ -53,6 +59,7 @@ class AuthScreenSnapshotsTest {
                     Box(Modifier.fillMaxSize().background(Flux.bg)) {
                         AuthContent(
                             state = state,
+                            oauth = oauth,
                             serverLabel = "flux.qiuli55.top",
                             onModeChange = {},
                             onIdentifierChange = {},
@@ -62,7 +69,7 @@ class AuthScreenSnapshotsTest {
                             onPasswordChange = {},
                             onTogglePassword = {},
                             onSubmit = {},
-                            onDemo = {},
+                            onOAuth = {},
                             onServer = {},
                         )
                     }
@@ -119,5 +126,23 @@ class AuthScreenSnapshotsTest {
             password = "12345678",
             loading = true,
         ),
+    )
+
+    @Test
+    fun loginOAuthJumping() = page(
+        "35-auth-login-oauth-jumping",
+        AuthFormState(),
+        AuthOAuthView(
+            provider = OAuthProvider.GitHub,
+            loading = true,
+            hint = "正在跳转 GitHub…",
+        ),
+    )
+
+    @Test
+    fun loginGoogleUnavailable() = page(
+        "36-auth-login-google-unavailable",
+        AuthFormState(),
+        AuthOAuthView(providers = CloudProviders(github = true, google = false)),
     )
 }

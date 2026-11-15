@@ -5,10 +5,14 @@ import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -40,8 +44,30 @@ class Store(context: Context) {
         logger = { message -> Log.d("FluxBot/Api", message) },
     )
 
+    /** GitHub / Google 登录：PKCE、pending verifier 加密落盘、回跳兑换。 */
+    val oauth = CloudOAuthManager(
+        auth = cloud,
+        secure = secure,
+        logger = { message -> Log.d("FluxBot/Cloud", message) },
+    )
+
     var state by mutableStateOf(load() ?: DemoData.seed())
         private set
+
+    /** 登录页的 OAuth 进度；AuthScreen 观察它并展示中文提示。 */
+    var oauthState by mutableStateOf<OAuthState>(OAuthState.Idle)
+        private set
+
+    /** 一次性提示（成功登录后的 toast）；由 FluxApp 消费。 */
+    var oauthNotice by mutableStateOf<String?>(null)
+        private set
+
+    private var oauthTimeoutJob: Job? = null
+    private var oauthGeneration = 0
+
+    @Volatile
+    private var oauthRedirectInFlight = false
+    private var oauthLastHandledUri: String? = null
 
     init {
         api.accountId = state.currentId
@@ -136,6 +162,113 @@ class Store(context: Context) {
     /** 应用启动后按需续期一次；失败由管理器的过期回调切回登录页。 */
     fun ensureCloudSession() {
         if (cloud.isLoggedIn) cloudScope.launch { cloud.ensureFresh() }
+    }
+
+    // ---------- GitHub / Google 登录 ----------
+
+    /**
+     * 登录页点第三方登录：生成 PKCE、把 verifier 写入加密存储，返回浏览器要打开的地址。
+     * 返回 null 表示本地已经失败，错误已写进 [oauthState]。
+     */
+    fun startOAuth(provider: OAuthProvider): String? {
+        oauthTimeoutJob?.cancel()
+        val generation = ++oauthGeneration
+        val url = try {
+            oauth.start(provider, cloudSettings.baseUrl)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("FluxBot/Cloud", "cloud oauth start failed provider=${provider.id}")
+            oauthState = OAuthState.Failed(provider, OAuthMessages.INCOMPLETE)
+            return null
+        }
+        oauthState = OAuthState.Starting(provider)
+        oauthTimeoutJob = cloudScope.launch {
+            delay(CloudOAuthManager.DEFAULT_PENDING_TTL_MS)
+            withContext(Dispatchers.Main.immediate) {
+                if (oauthGeneration == generation && oauthState is OAuthState.Starting) {
+                    oauth.timeout()
+                    oauthState = OAuthState.Failed(provider, OAuthMessages.INCOMPLETE)
+                }
+            }
+        }
+        return url
+    }
+
+    /** Custom Tabs 没能打开（没有浏览器提供者）；按登录未完成处理。 */
+    fun onOAuthLaunchFailed(provider: OAuthProvider) {
+        oauthTimeoutJob?.cancel()
+        oauth.cancel()
+        oauthState = OAuthState.Failed(provider, OAuthMessages.INCOMPLETE)
+    }
+
+    /**
+     * 从浏览器返回页面时调用。如果还停在 Starting，说明用户没有走完回跳（多半点了返回），
+     * 稍等一个回跳窗口后按「已取消登录」处理。成功回跳会先进入 Completing，不受影响。
+     */
+    fun onHostResumed() {
+        val starting = oauthState as? OAuthState.Starting ?: return
+        val generation = oauthGeneration
+        cloudScope.launch {
+            delay(OAUTH_RETURN_GRACE_MS)
+            withContext(Dispatchers.Main.immediate) {
+                if (oauthGeneration == generation && oauthState is OAuthState.Starting) {
+                    oauthTimeoutJob?.cancel()
+                    oauth.cancel()
+                    oauthState = OAuthState.Failed(starting.provider, OAuthMessages.CANCELLED)
+                }
+            }
+        }
+    }
+
+    /**
+     * 处理 flux://auth?code=... 回跳：解析、兑换、写入既有会话存储，然后切到云账户。
+     * 同一个 URI 只处理一次；失败时把中文原因写进 [oauthState]。
+     */
+    fun handleOAuthRedirect(rawUri: String?) {
+        val uri = rawUri?.trim()?.takeIf { it.isNotEmpty() } ?: return
+        // 没有 pending 流程时只认 flux://auth；有 pending 时把非法回跳也交给
+        // complete 处理，让用户看到明确的中文失败原因而不是静默无响应。
+        if (!isOAuthCallbackUri(uri) && !oauth.hasPending()) return
+        if (oauthRedirectInFlight || uri == oauthLastHandledUri) return
+        oauthLastHandledUri = uri
+        oauthRedirectInFlight = true
+        oauthTimeoutJob?.cancel()
+        val provider = oauth.pendingProvider()
+        oauthState = OAuthState.Completing(provider)
+        cloudScope.launch {
+            try {
+                val session = oauth.complete(uri)
+                withContext(Dispatchers.Main.immediate) {
+                    adoptCloudSession(session)
+                    oauthState = OAuthState.Idle
+                    oauthNotice = "已登录 · ${session.user.email.ifBlank { session.user.username }}"
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main.immediate) {
+                    oauthState = OAuthState.Failed(
+                        provider,
+                        e.message ?: OAuthMessages.INCOMPLETE,
+                    )
+                }
+            } finally {
+                oauthRedirectInFlight = false
+            }
+        }
+    }
+
+    /** AuthScreen 读过失败原因后清掉，避免每次重组都重复提示。 */
+    fun consumeOAuthState() {
+        if (oauthState is OAuthState.Failed) oauthState = OAuthState.Idle
+    }
+
+    /** 成功提示只展示一次。 */
+    fun consumeOAuthNotice(): String? {
+        val notice = oauthNotice
+        if (notice != null) oauthNotice = null
+        return notice
     }
 
     private fun adoptCloudSession(session: CloudSession) {
@@ -433,4 +566,9 @@ class Store(context: Context) {
     // ---------- 工具 ----------
 
     fun clock(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+
+    private companion object {
+        /** 从浏览器回到 App 后，给 onNewIntent 留出的回跳窗口。 */
+        const val OAUTH_RETURN_GRACE_MS = 500L
+    }
 }

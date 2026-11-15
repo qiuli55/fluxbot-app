@@ -204,6 +204,11 @@ fun FluxApp(store: Store) {
     // 冷启动恢复云账号后按需续期一次；401 会让管理器清空登录态并回到登录页。
     LaunchedEffect(Unit) { store.ensureCloudSession() }
 
+    // 第三方登录成功是异步回跳，可能在任意页面到达；统一在这里弹一次提示。
+    LaunchedEffect(store.oauthNotice) {
+        store.consumeOAuthNotice()?.let { ui.showToast(it) }
+    }
+
     val loggedIn = store.state.loggedIn
     LaunchedEffect(loggedIn) {
         if (!loggedIn) {

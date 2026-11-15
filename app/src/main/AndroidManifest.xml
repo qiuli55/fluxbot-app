@@ -26,11 +26,19 @@
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:exported="true"
+            android:launchMode="singleTask"
             android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Flux Cloud 第三方登录回跳；scheme / host 必须与账号云白名单一致。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="flux" android:host="auth" />
             </intent-filter>
         </activity>
     </application>

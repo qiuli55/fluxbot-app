@@ -54,6 +54,28 @@ class CloudClient(
         parseCloudTokens(call("POST", "/api/auth/token", body, null))
     }
 
+    /**
+     * 用第三方登录回跳里的一次性 code + PKCE verifier 换令牌。
+     *
+     * 响应体与 /api/auth/login/token 完全一致，直接复用 parseCloudTokens。
+     * 401 不能沿用密码登录的「账号或密码不正确」，否则用户会误以为自己输错了密码。
+     */
+    suspend fun exchange(code: String, codeVerifier: String): CloudTokens =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject()
+                .put("code", code)
+                .put("code_verifier", codeVerifier)
+            parseCloudTokens(
+                call(
+                    method = "POST",
+                    path = "/api/auth/exchange",
+                    body = body,
+                    bearer = null,
+                    errorText = ::exchangeErrorText,
+                ),
+            )
+        }
+
     suspend fun me(accessToken: String): CloudMe = withContext(Dispatchers.IO) {
         parseCloudMe(call("GET", "/api/auth/me", null, accessToken))
     }
@@ -72,6 +94,7 @@ class CloudClient(
         path: String,
         body: JSONObject?,
         bearer: String?,
+        errorText: (Int, String) -> String = ::defaultErrorText,
     ): JSONObject {
         val headers = LinkedHashMap<String, String>()
         headers["Accept"] = "application/json"
@@ -91,7 +114,7 @@ class CloudClient(
         } catch (e: CancellationException) {
             throw e
         } catch (e: IOException) {
-            throw ApiException("无法连接账号服务器，请检查网络或服务器地址", 0, "network")
+            throw ApiException(OAuthMessages.NETWORK, 0, "network")
         }
 
         val root = if (response.body.isBlank()) {
@@ -102,10 +125,26 @@ class CloudClient(
             }
         }
         if (response.code !in 200..299) {
-            val detail = cloudErrorText(root).ifBlank { defaultErrorMessage(response.code) }
-            throw ApiException(detail, response.code, errorCode(response.code))
+            val message = errorText(response.code, cloudErrorText(root))
+            throw ApiException(message, response.code, errorCode(response.code))
         }
         return root
+    }
+
+    /** 普通接口：优先展示服务端中文 detail，没有就用状态码兜底。 */
+    private fun defaultErrorText(status: Int, detail: String): String =
+        detail.ifBlank { defaultErrorMessage(status) }
+
+    /**
+     * 兑换接口的错误文案按状态码固定，不采用密码登录的 401 文案，
+     * 也不回显服务端可能变化的内部描述。
+     */
+    private fun exchangeErrorText(status: Int, detail: String): String = when (status) {
+        401 -> OAuthMessages.INVALID_CODE
+        403 -> OAuthMessages.ACCOUNT_UNAVAILABLE
+        429 -> OAuthMessages.RATE_LIMITED
+        in 500..599 -> OAuthMessages.SERVER_UNAVAILABLE
+        else -> detail.ifBlank { "登录失败（HTTP $status）" }
     }
 
     private fun defaultErrorMessage(status: Int): String = when (status) {

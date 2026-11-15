@@ -325,7 +325,7 @@ fun SettingsScreen() {
             }
 
             Text(
-                "Flux Bot 0.2.0 · 可交互演示\n账号由 flux.qiuli55.top 账号云统一管理",
+                "Flux Bot 0.4.0-beta.2 · 可交互演示\n账号由 flux.qiuli55.top 账号云统一管理",
                 fontSize = 11.sp,
                 color = Flux.text4,
                 lineHeight = 18.7.sp,

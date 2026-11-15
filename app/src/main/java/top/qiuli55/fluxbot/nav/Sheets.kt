@@ -111,7 +111,6 @@ import top.qiuli55.fluxbot.ui.SegTabs
 import top.qiuli55.fluxbot.ui.SecondaryButton
 
 sealed interface Sheet {
-    data object Login : Sheet
     data object AddAccount : Sheet
     data object CloudServer : Sheet
     data object Usage : Sheet
@@ -261,7 +260,6 @@ fun SheetHost() {
 @Composable
 private fun SheetBody(sheet: Sheet) {
     when (sheet) {
-        Sheet.Login -> LoginSheet()
         Sheet.AddAccount -> AddAccountSheet()
         Sheet.CloudServer -> CloudServerSheet()
         Sheet.Usage -> UsageSheet()
@@ -399,31 +397,6 @@ private fun MenuItem(text: String, danger: Boolean = false, onClick: () -> Unit)
 }
 
 // ---------- 账户 ----------
-
-@Composable
-private fun LoginSheet() {
-    val store = LocalStore.current
-    val ui = LocalUi.current
-    SheetFrame("登录 Flux 账号") {
-        SheetHint("选择一个演示账户。两个账户的 Bot、消息与记忆完全隔离。", top = 0)
-        Spacer(Modifier.height(4.dp))
-        store.state.accounts.forEach { acc ->
-            Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
-            OptionRow(
-                title = acc.account.name,
-                sub = acc.account.email,
-                leading = { InitialsAvatar(acc.account.initials, 38.dp) },
-                chevron = true,
-            ) {
-                store.login(acc.account.id)
-                ui.closeSheet()
-                ui.reset(Route.Home)
-                ui.showToast("已登录 · ${acc.account.email}")
-            }
-        }
-        SheetHint("账号由 flux.qiuli55.top 账号云统一管理。")
-    }
-}
 
 @Composable
 private fun AddAccountSheet() {

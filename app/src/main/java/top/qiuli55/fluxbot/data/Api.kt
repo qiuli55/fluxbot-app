@@ -218,13 +218,31 @@ internal fun JSONObject.optStringOrEmpty(key: String): String =
  *
  * 服务器地址存在普通 SharedPreferences；访问令牌属于登录态，按账号用 Keystore 加密保存。
  */
-class Api(context: Context) {
+class Api(context: Context, private val cloud: CloudAuthManager? = null) {
 
     private val prefs = context.getSharedPreferences("fluxbot.api", Context.MODE_PRIVATE)
     private val secure = SecureStore(context)
 
     /** 当前账号；令牌按账号隔离，切账号时由 Store 更新。 */
     var accountId: String? = null
+
+    /**
+     * 云账号登录时 true：请求优先带 Flux 账号 access token；
+     * 未登录云账号 / 使用设备配对时 false，继续沿用设备令牌。
+     */
+    var useCloudAuth: Boolean = false
+
+    /**
+     * 当前请求应使用的 Bearer：云账号令牌优先，没有则退回设备令牌。
+     * 媒体下载等同步路径只看已缓存的 access token，不会在这里触发网络刷新。
+     */
+    val authToken: String
+        get() {
+            if (useCloudAuth) {
+                cloud?.cachedAccessToken()?.takeIf { it.isNotBlank() }?.let { return it }
+            }
+            return token
+        }
 
     private val tokenKey: String
         get() = accountId?.let { "acc.$it.api_token" } ?: SYS_TOKEN_KEY
@@ -862,18 +880,51 @@ class Api(context: Context) {
 
     // ---------- 底层请求 ----------
 
-    internal fun request(
+    /**
+     * 统一请求入口：云账号登录时使用账号 access token，并在收到 401 时
+     * 单飞刷新、原样重试一次；仍失败则把原始 401 抛给调用方（同时登录态
+     * 已由管理器的过期回调切回登录页）。设备令牌流程保持原样。
+     */
+    internal suspend fun request(
         method: String,
         path: String,
         body: JSONObject?,
         timeoutMs: Int = 60_000,
+    ): JSONObject {
+        val cloudToken = if (useCloudAuth) cloud?.accessTokenForRequest() else null
+        // 云账号登录态已经失效时不要把设备令牌发出去，直接让界面回登录页。
+        if (useCloudAuth && cloudToken == null) {
+            throw ApiException("登录已过期，请重新登录", 401, "cloud_expired")
+        }
+        return try {
+            requestOnce(method, path, body, timeoutMs, cloudToken ?: token)
+        } catch (e: ApiException) {
+            if (e.status == 401 && cloudToken != null && cloud != null) {
+                val refreshed = cloud.refreshAfterUnauthorized(cloudToken)
+                if (refreshed != null) {
+                    requestOnce(method, path, body, timeoutMs, refreshed)
+                } else {
+                    throw e
+                }
+            } else {
+                throw e
+            }
+        }
+    }
+
+    private fun requestOnce(
+        method: String,
+        path: String,
+        body: JSONObject?,
+        timeoutMs: Int,
+        bearer: String,
     ): JSONObject {
         val conn = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 15_000
             readTimeout = timeoutMs
             setRequestProperty("Accept", "application/json")
-            if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
+            if (bearer.isNotBlank()) setRequestProperty("Authorization", "Bearer $bearer")
             // 本地账号隔离：服务端用它区分连接器记录（将来接真实登录后改为令牌 subject）
             accountId?.takeIf { it.isNotBlank() }?.let {
                 setRequestProperty("X-Flux-Account", it)

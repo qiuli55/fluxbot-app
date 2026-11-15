@@ -1,9 +1,14 @@
 package top.qiuli55.fluxbot.data
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -12,16 +17,31 @@ import kotlin.random.Random
 
 class Store(context: Context) {
 
-    private val prefs = context.getSharedPreferences("fluxbot.v1", Context.MODE_PRIVATE)
-    private val secure = SecureStore(context)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences("fluxbot.v1", Context.MODE_PRIVATE)
+    private val secure = SecureStore(appContext)
+    private val cloudScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val api = Api(context)
+    /** 账号服务器地址（默认 flux.qiuli55.top），与 Bot 后端地址互相独立。 */
+    val cloudSettings = CloudSettings(appContext)
+
+    /** Flux 账号云登录态：加密持久化、提前续期、401 单飞刷新。 */
+    val cloud = CloudAuthManager(
+        client = CloudClient(UrlConnectionHttpTransport()) { cloudSettings.baseUrl },
+        tokenStore = SecureCloudTokenStore(secure),
+        scope = cloudScope,
+        logger = { message -> Log.d("FluxBot/Cloud", message) },
+        onSessionExpired = { onCloudSessionExpired() },
+    )
+
+    val api = Api(appContext, cloud)
 
     var state by mutableStateOf(load() ?: DemoData.seed())
         private set
 
     init {
         api.accountId = state.currentId
+        if (cloud.isLoggedIn) restoreCloudAccount()
     }
 
     private fun load(): AppState? = prefs.getString("data", null)?.let {
@@ -44,34 +64,121 @@ class Store(context: Context) {
 
     // ---------- 账户 ----------
 
+    /** 演示账户登录（保留原有行为，不触碰 Flux 账号云的登录态）。 */
     fun login(accountId: String? = null) {
         update { it.copy(currentId = accountId ?: it.currentId, loggedIn = true) }
         api.accountId = state.currentId
+        api.useCloudAuth = false
     }
-
-    fun logout() = update { it.copy(loggedIn = false) }
 
     fun switchAccount(id: String) {
         update { it.copy(currentId = id, loggedIn = true) }
         api.accountId = id
+        api.useCloudAuth = cloud.isLoggedIn && id == cloudAccountId()
     }
 
     fun addAccount(email: String, name: String): String {
         val acc = DemoData.newAccount(email, name)
         update { it.copy(accounts = it.accounts + acc, currentId = acc.account.id, loggedIn = true) }
         api.accountId = state.currentId
+        api.useCloudAuth = false
         return acc.account.id
     }
 
     fun deleteAccount(id: String) {
         // 该账号名下的访问令牌与全部保管库密文一并销毁
         secure.removePrefix("acc.$id.")
+        if (id == cloudAccountId()) {
+            cloud.clearLocalSession()
+            api.useCloudAuth = false
+        }
         update { s ->
             val left = s.accounts.filterNot { it.account.id == id }
             val accounts = if (left.isEmpty()) listOf(DemoData.mainAccount()) else left
             AppState(accounts, accounts.first().account.id, s.loggedIn)
         }
         api.accountId = state.currentId
+    }
+
+    // ---------- Flux 账号云 ----------
+
+    /** 用 Flux 账号登录；成功后把本机账户切到该云用户。 */
+    suspend fun loginCloud(identifier: String, password: String) {
+        adoptCloudSession(cloud.login(identifier, password))
+    }
+
+    /** 注册后立即登录（服务端注册接口只发 Cookie，不返回令牌）。 */
+    suspend fun registerCloud(
+        email: String,
+        password: String,
+        username: String? = null,
+        displayName: String? = null,
+    ) {
+        adoptCloudSession(cloud.register(email, password, username, displayName))
+    }
+
+    /**
+     * 退出登录：先同步清掉本机加密令牌，再让管理器尽力通知服务端。
+     * 服务端当前只支持 Cookie 退出，refresh token 会保留到自然过期。
+     */
+    fun logout() {
+        val hadCloud = cloud.isLoggedIn
+        cloud.clearLocalSession()
+        api.useCloudAuth = false
+        update { it.copy(loggedIn = false) }
+        if (hadCloud) cloudScope.launch { cloud.logoutRemote() }
+    }
+
+    /** 应用启动后按需续期一次；失败由管理器的过期回调切回登录页。 */
+    fun ensureCloudSession() {
+        if (cloud.isLoggedIn) cloudScope.launch { cloud.ensureFresh() }
+    }
+
+    private fun adoptCloudSession(session: CloudSession) {
+        val user = session.user
+        val id = "cloud-${user.id}"
+        val email = user.email.ifBlank { user.username }
+        val name = user.name
+        update { s ->
+            val existing = s.accounts.any { it.account.id == id }
+            val accounts = if (existing) {
+                s.accounts.map { st ->
+                    if (st.account.id != id) {
+                        st
+                    } else {
+                        st.copy(
+                            account = st.account.copy(
+                                name = name,
+                                email = email,
+                                initials = user.initials,
+                                plan = "Flux Cloud",
+                            ),
+                        )
+                    }
+                }
+            } else {
+                s.accounts + DemoData.cloudAccount(id, email, name, user.initials)
+            }
+            s.copy(accounts = accounts, currentId = id, loggedIn = true)
+        }
+        api.accountId = id
+        api.useCloudAuth = true
+    }
+
+    /** 冷启动时恢复上次的云账号；本机账户数据沿用，身份字段以云端返回为准。 */
+    private fun restoreCloudAccount() {
+        val session = cloud.currentSession ?: return
+        adoptCloudSession(session)
+    }
+
+    private fun cloudAccountId(): String =
+        cloud.cachedUser()?.let { "cloud-${it.id}" }.orEmpty()
+
+    private fun onCloudSessionExpired() {
+        cloudScope.launch(Dispatchers.Main.immediate) {
+            api.useCloudAuth = false
+            if (state.loggedIn) update { it.copy(loggedIn = false) }
+        }
     }
 
     private fun updateCur(transform: (AccountState) -> AccountState) {

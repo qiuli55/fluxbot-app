@@ -120,6 +120,15 @@ fun AccountScreen() {
 
             SectionLabel("当前账户")
             FluxCard {
+                if (store.cloud.isLoggedIn) {
+                    ItemRow(
+                        title = "Flux Cloud 登录",
+                        sub = "access token 到期前自动续期；退出登录会清除本机令牌",
+                        leading = { FIcon(FIcon.Shield, size = 18.dp, color = Flux.accent) },
+                        trailing = { RowValue("已连接") },
+                        showDivider = true,
+                    )
+                }
                 ItemRow(
                     title = "用量",
                     sub = "本月已用 ${account.used}%",
@@ -135,6 +144,25 @@ fun AccountScreen() {
                     title = "管理订阅",
                     trailing = { RowValue(account.plan); Spacer(Modifier.width(6.dp)); RowChevron() },
                     onClick = { ui.sheet = Sheet.Subscription },
+                )
+            }
+
+            SectionLabel("账号服务")
+            FluxCard {
+                ItemRow(
+                    title = "账号服务器",
+                    sub = "登录、注册与令牌刷新地址",
+                    trailing = {
+                        RowValue(
+                            store.cloudSettings.baseUrl
+                                .removePrefix("https://")
+                                .removePrefix("http://")
+                                .trimEnd('/'),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        RowChevron()
+                    },
+                    onClick = { ui.sheet = Sheet.CloudServer },
                 )
             }
 
@@ -219,14 +247,15 @@ fun AccountScreen() {
             FluxCard {
                 ItemRow(
                     title = "退出登录",
-                    sub = "本机数据保留，下次登录继续",
+                    sub = "清除本机保存的 Flux 账号令牌",
                     titleColor = Flux.danger,
                     trailing = { FIcon(FIcon.ChevronRight, size = 15.dp, color = Flux.danger) },
                     showDivider = true,
                     onClick = {
                         ui.sheet = Sheet.Confirm(
                             title = "退出登录？",
-                            text = "本机的对话、记忆与保管库会保留。\n下次用 Flux 账号登录后继续。",
+                            text = "本机加密保存的 access / refresh token 会立即清除；\n" +
+                                "对话、记忆与保管库保留，下次登录后继续。",
                             action = "退出登录",
                         ) { store.logout() }
                     },

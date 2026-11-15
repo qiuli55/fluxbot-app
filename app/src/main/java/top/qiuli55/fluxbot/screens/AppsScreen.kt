@@ -54,7 +54,7 @@ fun AppsScreen() {
     val store = LocalStore.current
     val ui = LocalUi.current
     val connected = store.current().connected
-    val signedIn = store.api.token.isNotBlank()
+    val signedIn = store.api.authToken.isNotBlank()
     var connectors by remember { mutableStateOf<List<RemoteConnector>>(emptyList()) }
     var cat by remember { mutableStateOf("全部") }
     var query by remember { mutableStateOf("") }

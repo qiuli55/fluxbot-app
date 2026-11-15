@@ -72,6 +72,7 @@ import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Api
 import top.qiuli55.fluxbot.data.ApiException
 import top.qiuli55.fluxbot.data.Bot
+import top.qiuli55.fluxbot.data.CloudSettings
 import top.qiuli55.fluxbot.data.DeviceLogin
 import top.qiuli55.fluxbot.data.ModelCatalog
 import top.qiuli55.fluxbot.data.RemoteConnector
@@ -87,6 +88,7 @@ import top.qiuli55.fluxbot.data.getPage
 import top.qiuli55.fluxbot.data.getSkill
 import top.qiuli55.fluxbot.data.listRoutineDetails
 import top.qiuli55.fluxbot.data.listVaultLogins
+import top.qiuli55.fluxbot.data.normalizeAccountBaseUrl
 import top.qiuli55.fluxbot.data.putProfile
 import top.qiuli55.fluxbot.data.relativeTime
 import top.qiuli55.fluxbot.data.revealLoginPassword
@@ -111,6 +113,7 @@ import top.qiuli55.fluxbot.ui.SecondaryButton
 sealed interface Sheet {
     data object Login : Sheet
     data object AddAccount : Sheet
+    data object CloudServer : Sheet
     data object Usage : Sheet
     data object Subscription : Sheet
     data class Connector(val id: String) : Sheet
@@ -260,6 +263,7 @@ private fun SheetBody(sheet: Sheet) {
     when (sheet) {
         Sheet.Login -> LoginSheet()
         Sheet.AddAccount -> AddAccountSheet()
+        Sheet.CloudServer -> CloudServerSheet()
         Sheet.Usage -> UsageSheet()
         Sheet.Subscription -> SubscriptionSheet()
         is Sheet.Connector -> ConnectorSheet(sheet.id)
@@ -449,6 +453,92 @@ private fun AddAccountSheet() {
                 ui.showToast("已添加并切换到 $v")
             }
         }
+    }
+}
+
+/**
+ * Flux 账号服务器地址：只影响登录 / 注册 / 刷新，与 Bot 后端地址相互独立。
+ * 保存前用未鉴权的 GET /api/auth/providers 探活，失败时回退到原地址。
+ */
+@Composable
+private fun CloudServerSheet() {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val scope = rememberCoroutineScope()
+    var url by remember { mutableStateOf(store.cloudSettings.baseUrl) }
+    var testing by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf("") }
+    val normalized = normalizeAccountBaseUrl(url)
+
+    SheetFrame("Flux 账号服务器") {
+        SheetHint(
+            "登录、注册与令牌刷新都发往这个地址；与 Bot 后端地址互相独立。",
+            top = 0,
+        )
+        Spacer(Modifier.height(14.dp))
+        FieldLabel("账号服务器地址")
+        Spacer(Modifier.height(8.dp))
+        FluxInput(
+            url,
+            { url = it; result = "" },
+            placeholder = CloudSettings.DEFAULT_BASE_URL,
+            keyboardType = KeyboardType.Uri,
+        )
+        if (url.isNotBlank() && normalized == null) {
+            Text(
+                "请输入以 http:// 或 https:// 开头的完整地址",
+                fontSize = 11.5.sp,
+                color = Flux.danger,
+                modifier = Modifier.padding(start = 4.dp, top = 6.dp),
+            )
+        }
+        Text(
+            "默认 ${CloudSettings.DEFAULT_BASE_URL}",
+            fontSize = 11.sp,
+            color = Flux.text4,
+            lineHeight = 18.sp,
+            modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+        )
+        if (result.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            Text(result, fontSize = 12.sp, color = Flux.text2, lineHeight = 18.sp)
+        }
+        Spacer(Modifier.height(16.dp))
+        PrimaryButton(
+            if (testing) "正在连接…" else "测试并保存",
+            enabled = !testing && normalized != null,
+        ) {
+            val target = normalized ?: return@PrimaryButton
+            testing = true
+            scope.launch {
+                val previous = store.cloudSettings.baseUrl
+                store.cloudSettings.baseUrl = target
+                try {
+                    val providers = store.cloud.providers()
+                    result = "连接成功 · GitHub " +
+                        (if (providers.github) "已启用" else "未启用") +
+                        " · Google " +
+                        (if (providers.google) "已启用" else "未启用")
+                    ui.showToast("账号服务器已保存")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    store.cloudSettings.baseUrl = previous
+                    url = previous
+                    result = e.message ?: "连接失败，请检查地址"
+                } finally {
+                    testing = false
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        SecondaryButton("恢复默认地址") {
+            store.cloudSettings.reset()
+            url = store.cloudSettings.baseUrl
+            result = "已恢复默认地址"
+        }
+        Spacer(Modifier.height(6.dp))
+        SheetHint("地址只保存在本机；不会上传，也不会写进日志。")
     }
 }
 
@@ -1144,7 +1234,10 @@ private fun ServerSheet() {
                 }
             }
         }
-        SheetHint("配对码由服务器一次性签发；已有令牌只保存在本机，适用于高级场景。")
+        SheetHint(
+            "配对码由服务器一次性签发；已有令牌只保存在本机，适用于高级场景。" +
+                "用 Flux 账号登录时，请求优先使用账号 access token。",
+        )
     }
 }
 

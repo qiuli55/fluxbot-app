@@ -201,6 +201,9 @@ fun FluxApp(store: Store) {
         Modifier
     }
 
+    // 冷启动恢复云账号后按需续期一次；401 会让管理器清空登录态并回到登录页。
+    LaunchedEffect(Unit) { store.ensureCloudSession() }
+
     val loggedIn = store.state.loggedIn
     LaunchedEffect(loggedIn) {
         if (!loggedIn) {

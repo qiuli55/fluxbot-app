@@ -1,5 +1,6 @@
 package top.qiuli55.fluxbot.screens
 
+import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -17,6 +18,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,7 +30,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import top.qiuli55.fluxbot.data.Account
+import top.qiuli55.fluxbot.data.RemoteBrowserStatus
+import top.qiuli55.fluxbot.data.RemoteChannelStatus
+import top.qiuli55.fluxbot.data.SkillSummary
+import top.qiuli55.fluxbot.data.browserStatus
+import top.qiuli55.fluxbot.data.channelStatuses
+import top.qiuli55.fluxbot.data.pageCount
+import top.qiuli55.fluxbot.data.pendingDraftCount
+import top.qiuli55.fluxbot.data.sharedMemoryCount
+import top.qiuli55.fluxbot.data.skillSummary
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Route
@@ -45,6 +61,26 @@ fun SettingsScreen() {
     val acc = store.current()
     val account = acc.account
     val settings = acc.settings
+    var hub by remember { mutableStateOf(HubStats()) }
+
+    LaunchedEffect(ui.dataRevision) {
+        suspend fun <T> quiet(label: String, block: suspend () -> T): T? = try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("FluxBot/V040", "settings hub $label failed", e)
+            null
+        }
+        hub = HubStats(
+            skills = quiet("skills") { store.api.skillSummary() },
+            channels = quiet("channels") { store.api.channelStatuses() } ?: emptyList(),
+            browser = quiet("browser") { store.api.browserStatus() },
+            drafts = quiet("drafts") { store.api.pendingDraftCount() } ?: 0,
+            pages = quiet("pages") { store.api.pageCount() } ?: 0,
+            memory = quiet("memory") { store.api.sharedMemoryCount() } ?: 0,
+        )
+    }
 
     Column(Modifier.fillMaxSize().background(Flux.bg)) {
         PageHead("设置", onBack = { ui.back() })
@@ -101,6 +137,82 @@ fun SettingsScreen() {
                     sub = "Bot 后端地址与访问令牌",
                     trailing = { RowValue(if (store.api.baseUrl.contains("instabox")) "已预填" else "自定义"); Spacer(Modifier.width(6.dp)); RowChevron() },
                     onClick = { ui.sheet = Sheet.Server },
+                )
+            }
+
+            SectionLabel("Bot 能力")
+            FluxCard {
+                ItemRow(
+                    title = "技能库",
+                    sub = "写给 Bot 的操作说明",
+                    trailing = {
+                        RowValue(
+                            hub.skills?.let { "${it.enabled}/${it.total}" } ?: "—",
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        RowChevron()
+                    },
+                    showDivider = true,
+                    onClick = { ui.push(Route.Skills) },
+                )
+                ItemRow(
+                    title = "通道",
+                    sub = "飞书 / 企业微信 / 钉钉",
+                    trailing = {
+                        RowValue(
+                            if (hub.channels.isEmpty()) "—"
+                            else "${hub.channels.count { it.connected }}/${hub.channels.size} 已接入",
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        RowChevron()
+                    },
+                    showDivider = true,
+                    onClick = { ui.push(Route.Channels) },
+                )
+                ItemRow(
+                    title = "浏览器",
+                    sub = "Bot 自己打开网页查资料",
+                    trailing = {
+                        RowValue(
+                            when {
+                                hub.browser == null -> "—"
+                                !hub.browser!!.configured -> "未接入"
+                                hub.browser!!.reachable -> "可访问"
+                                else -> "不可访问"
+                            },
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        RowChevron()
+                    },
+                    onClick = { ui.push(Route.Browser) },
+                )
+            }
+
+            SectionLabel("内容与记忆")
+            FluxCard {
+                ItemRow(
+                    title = "待发送草稿",
+                    sub = "出站消息先停在这里等你点头",
+                    trailing = {
+                        RowValue(if (hub.drafts > 0) hub.drafts.toString() else "无")
+                        Spacer(Modifier.width(6.dp))
+                        RowChevron()
+                    },
+                    showDivider = true,
+                    onClick = { ui.push(Route.OutboundDrafts) },
+                )
+                ItemRow(
+                    title = "Pages",
+                    sub = "Bot 生成的网页",
+                    trailing = { RowValue(hub.pages.toString()); Spacer(Modifier.width(6.dp)); RowChevron() },
+                    showDivider = true,
+                    onClick = { ui.push(Route.Pages) },
+                )
+                ItemRow(
+                    title = "共享记忆",
+                    sub = "跨 Bot 的资料与随手记",
+                    trailing = { RowValue(hub.memory.toString()); Spacer(Modifier.width(6.dp)); RowChevron() },
+                    onClick = { ui.push(Route.SharedMemory) },
                 )
             }
 
@@ -225,6 +337,15 @@ fun SettingsScreen() {
 }
 
 /* ---------------- 组件 ---------------- */
+
+private data class HubStats(
+    val skills: SkillSummary? = null,
+    val channels: List<RemoteChannelStatus> = emptyList(),
+    val browser: RemoteBrowserStatus? = null,
+    val drafts: Int = 0,
+    val pages: Int = 0,
+    val memory: Int = 0,
+)
 
 @Composable
 private fun AccountCardRow(account: Account, onClick: () -> Unit) {

@@ -26,7 +26,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -38,13 +40,19 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.util.Log
+import kotlinx.coroutines.CancellationException
+import top.qiuli55.fluxbot.data.RemoteVaultLogin
 import top.qiuli55.fluxbot.data.VaultItem
+import top.qiuli55.fluxbot.data.listVaultLogins
+import top.qiuli55.fluxbot.data.relativeTime
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Sheet
 import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
 import top.qiuli55.fluxbot.ui.PageHead
+import top.qiuli55.fluxbot.ui.V040Error
 import kotlin.math.abs
 
 private data class VaultCat(val key: String, val label: String)
@@ -76,6 +84,25 @@ fun VaultScreen() {
     val ui = LocalUi.current
     val all = store.current().vault
     var cat by remember { mutableStateOf("all") }
+    var serverLogins by remember { mutableStateOf<List<RemoteVaultLogin>>(emptyList()) }
+    var serverLoading by remember { mutableStateOf(true) }
+    var serverError by remember { mutableStateOf("") }
+    var refresh by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(refresh, ui.dataRevision) {
+        serverLoading = true
+        serverError = ""
+        try {
+            serverLogins = store.api.listVaultLogins()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("FluxBot/V040", "list server vault logins failed", e)
+            serverError = e.message ?: "服务器保管库加载失败"
+        } finally {
+            serverLoading = false
+        }
+    }
 
     val items = if (cat == "all") all else all.filter { it.cat == cat }
     val counts = CATS.associate { it.key to (if (it.key == "all") all.size else all.count { v -> v.cat == it.key }) }
@@ -170,6 +197,38 @@ fun VaultScreen() {
                         )
                     }
                 }
+
+                if (cat == "all" || cat == "login") {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "服务器保管库 · ${serverLogins.size}",
+                        fontSize = 12.sp,
+                        color = Flux.text3,
+                        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 8.dp),
+                    )
+                    when {
+                        serverLoading -> Text(
+                            "正在读取…",
+                            fontSize = 12.sp,
+                            color = Flux.text4,
+                            modifier = Modifier.padding(4.dp),
+                        )
+                        serverError.isNotBlank() -> V040Error(serverError) { refresh++ }
+                        serverLogins.isEmpty() -> Text(
+                            "服务器上还没有保存登录信息。Bot 在任务中保存的账号会出现在这里。",
+                            fontSize = 12.sp,
+                            color = Flux.text3,
+                            lineHeight = 19.sp,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                        else -> serverLogins.forEach { login ->
+                            ServerVaultRow(login) {
+                                ui.haptic(10)
+                                ui.sheet = Sheet.ServerVaultDetail(login.id)
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -184,6 +243,49 @@ fun VaultScreen() {
             Spacer(Modifier.width(8.dp))
             Text("由系统密钥库加密 · Bot 仅在任务中按需读取", fontSize = 11.5.sp, color = Flux.text4)
         }
+    }
+}
+
+@Composable
+private fun ServerVaultRow(item: RemoteVaultLogin, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = 9.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Flux.panel)
+            .border(1.dp, Flux.lineSoft, RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 15.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(Flux.panel2),
+            contentAlignment = Alignment.Center,
+        ) {
+            FIcon(FIcon.Key, size = 17.dp, color = Flux.accent2)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                item.site.ifBlank { "未命名站点" },
+                fontSize = 14.sp,
+                fontWeight = FontWeight(500),
+                color = Flux.text,
+                maxLines = 1,
+            )
+            Text(
+                listOfNotNull(
+                    item.username.takeIf { it.isNotBlank() },
+                    relativeTime(item.updatedAt).ifBlank { item.updatedAt },
+                ).joinToString(" · "),
+                fontSize = 11.sp,
+                color = Flux.text3,
+                maxLines = 1,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
+        Text("服务器", fontSize = 10.5.sp, color = Flux.text4)
     }
 }
 

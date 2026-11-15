@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -43,10 +44,16 @@ import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.ApprovalRule
 import top.qiuli55.fluxbot.data.ApprovalRuleDraft
 import top.qiuli55.fluxbot.data.ApprovalRuleType
+import top.qiuli55.fluxbot.data.ApprovalSettings
 import top.qiuli55.fluxbot.data.approvalRuleDescription
-import top.qiuli55.fluxbot.data.creatorLabel
+import top.qiuli55.fluxbot.data.approvalSettings
+import top.qiuli55.fluxbot.data.botCreatorLabel
 import top.qiuli55.fluxbot.data.displayDescription
+import top.qiuli55.fluxbot.data.fallbackApprovalSettings
+import top.qiuli55.fluxbot.data.formatThreshold
 import top.qiuli55.fluxbot.data.paramsSummary
+import top.qiuli55.fluxbot.data.updateApprovalSettings
+import top.qiuli55.fluxbot.data.validateThresholdInput
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Sheet
@@ -80,6 +87,12 @@ fun ApprovalRulesScreen() {
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var editor by remember { mutableStateOf<RuleEditorState?>(null) }
+    var settings by remember { mutableStateOf<ApprovalSettings?>(null) }
+    var settingsLoading by remember { mutableStateOf(true) }
+    var settingsError by remember { mutableStateOf<String?>(null) }
+    var thresholdEditing by remember { mutableStateOf(false) }
+    var thresholdSaving by remember { mutableStateOf(false) }
+    var thresholdError by remember { mutableStateOf("") }
 
     suspend fun refresh() {
         loading = true
@@ -95,12 +108,54 @@ fun ApprovalRulesScreen() {
         }
     }
 
-    LaunchedEffect(Unit) { refresh() }
+    suspend fun refreshSettings() {
+        settingsLoading = true
+        settingsError = null
+        try {
+            settings = store.api.approvalSettings()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            settingsError = e.message ?: "加载默认规则失败"
+        } finally {
+            settingsLoading = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        refresh()
+        refreshSettings()
+    }
 
     ApprovalRulesPage(
         rules = rules,
         loading = loading,
         error = error,
+        settings = settings,
+        settingsLoading = settingsLoading,
+        settingsError = settingsError,
+        thresholdEditing = thresholdEditing,
+        thresholdSaving = thresholdSaving,
+        thresholdError = thresholdError,
+        onEditThreshold = { thresholdEditing = it; thresholdError = "" },
+        onSaveThreshold = { value ->
+            thresholdSaving = true
+            thresholdError = ""
+            ui.scope.launch {
+                try {
+                    settings = store.api.updateApprovalSettings(value)
+                    thresholdEditing = false
+                    ui.showToast("已更新大额付款阈值")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    thresholdError = e.message ?: "保存失败"
+                } finally {
+                    thresholdSaving = false
+                }
+            }
+        },
+        onRetrySettings = { ui.scope.launch { refreshSettings() } },
         botNameFor = { id -> store.bot(id)?.name },
         onBack = { ui.back() },
         onRetry = { ui.scope.launch { refresh() } },
@@ -181,6 +236,15 @@ internal fun ApprovalRulesPage(
     rules: List<ApprovalRule>,
     loading: Boolean = false,
     error: String? = null,
+    settings: ApprovalSettings? = null,
+    settingsLoading: Boolean = false,
+    settingsError: String? = null,
+    thresholdEditing: Boolean = false,
+    thresholdSaving: Boolean = false,
+    thresholdError: String = "",
+    onEditThreshold: (Boolean) -> Unit = {},
+    onSaveThreshold: (Double) -> Unit = {},
+    onRetrySettings: () -> Unit = {},
     botNameFor: (String) -> String? = { null },
     onBack: () -> Unit = {},
     onRetry: () -> Unit = {},
@@ -191,18 +255,47 @@ internal fun ApprovalRulesPage(
     onEditorChange: (RuleEditorState?) -> Unit = {},
 ) {
     val resolver: (String) -> String? = { botNameFor(it) }
-    Box(Modifier.fillMaxSize().background(Flux.bg)) {
+    val userRules = rules.filter { it.createdByKind != "bot" }
+    val botRules = rules.filter { it.createdByKind == "bot" }
+    // 设置接口失败时继续展示本地内置项：阈值优先用上一次成功读取的值，
+    // 从未成功读取过则用出厂默认值；错误提示单独显示在卡片底部。
+    val shownSettings = settings
+        ?: if (settingsError != null) fallbackApprovalSettings() else null
+    BoxWithConstraints(Modifier.fillMaxSize().background(Flux.bg)) {
+        // 真实页面由 AnimatedContent 提供有界高度，weight 会撑满中间区域并固定底部按钮。
+        // 若被放进无界高度的滚动容器（例如整页截图脚手架），weight 会被压成 0，
+        // 此时改为按内容顺序排列，保证说明、默认项和规则列表仍然可见。
+        val boundedHeight = constraints.hasBoundedHeight
         Column(Modifier.fillMaxSize().imePadding()) {
             PageHead("权限审批", onBack = onBack)
             Column(
                 Modifier
-                    .weight(1f)
+                    .then(if (boundedHeight) Modifier.weight(1f) else Modifier)
                     .verticalScroll(rememberScrollState())
                     .padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 16.dp),
             ) {
-                ScopeCard()
+                Text(
+                    "只有这些情况会弹出确认，其他操作都直接执行。",
+                    fontSize = 12.sp,
+                    color = Flux.text3,
+                    lineHeight = 18.sp,
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp),
+                )
 
-                SectionLabel("规则 · 对全部 Bot 生效")
+                SectionLabel("默认需要确认")
+                DefaultRulesCard(
+                    settings = shownSettings,
+                    loading = settingsLoading,
+                    error = settingsError,
+                    thresholdEditing = thresholdEditing,
+                    thresholdSaving = thresholdSaving,
+                    thresholdError = thresholdError,
+                    onEditThreshold = onEditThreshold,
+                    onSaveThreshold = onSaveThreshold,
+                    onRetry = onRetrySettings,
+                )
+
+                SectionLabel("我设置的规则")
                 when {
                     loading -> Text(
                         "正在加载审批规则…",
@@ -211,21 +304,43 @@ internal fun ApprovalRulesPage(
                         modifier = Modifier.padding(vertical = 18.dp),
                     )
                     error != null -> ErrorCard(error, onRetry)
-                    rules.isEmpty() -> EmptyCard(
-                        "还没有审批规则。\n" +
-                            "默认不需要我审批：Bot 的操作会直接执行，不会打扰你。\n" +
+                    userRules.isEmpty() -> EmptyCard(
+                        "还没有你设置的规则。\n" +
+                            "默认不需要确认，Bot 的操作会直接执行。\n" +
                             "点下面的「添加规则」开始限制。",
                     )
                     else -> FluxCard {
-                        rules.forEachIndexed { index, rule ->
+                        userRules.forEachIndexed { index, rule ->
                             RuleRow(
                                 rule = rule,
-                                creator = rule.creatorLabel(resolver),
                                 onToggle = { onToggle(rule, it) },
                                 onDelete = { onDelete(rule) },
                                 onEdit = { onEditorChange(RuleEditorState.Edit(rule.type, rule)) },
                             )
-                            if (index != rules.lastIndex) Hairline()
+                            if (index != userRules.lastIndex) Hairline()
+                        }
+                    }
+                }
+
+                SectionLabel("Bot 设置的规则")
+                if (!loading && error == null) {
+                    if (botRules.isEmpty()) {
+                        Text(
+                            "Bot 还没有给自己加过规则。",
+                            fontSize = 12.sp,
+                            color = Flux.text4,
+                            modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp),
+                        )
+                    } else {
+                        FluxCard {
+                            botRules.forEachIndexed { index, rule ->
+                                BotRuleRow(
+                                    rule = rule,
+                                    creator = rule.botCreatorLabel(resolver),
+                                    onDelete = { onDelete(rule) },
+                                )
+                                if (index != botRules.lastIndex) Hairline()
+                            }
                         }
                     }
                 }
@@ -274,36 +389,266 @@ internal fun ApprovalRulesPage(
 
 /* ---------------- 列表 ---------------- */
 
+/** 服务端内置的三类确认场景；大额付款一行可以就地改阈值。 */
 @Composable
-private fun ScopeCard() {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(Flux.panel)
-            .border(1.dp, Flux.lineSoft, RoundedCornerShape(18.dp))
-            .padding(horizontal = 16.dp, vertical = 15.dp),
-    ) {
-        Text("默认不需要我审批", fontSize = 14.sp, fontWeight = FontWeight(560), color = Flux.text)
+private fun DefaultRulesCard(
+    settings: ApprovalSettings?,
+    loading: Boolean,
+    error: String?,
+    thresholdEditing: Boolean,
+    thresholdSaving: Boolean,
+    thresholdError: String,
+    onEditThreshold: (Boolean) -> Unit,
+    onSaveThreshold: (Double) -> Unit,
+    onRetry: () -> Unit,
+) {
+    FluxCard {
+        when {
+            settings == null && loading -> DefaultCardHint("正在读取默认规则…")
+            settings == null -> DefaultCardHint("暂时读不到默认规则。")
+            settings.builtins.isEmpty() -> DefaultCardHint("服务器没有返回默认规则。")
+            else -> settings.builtins.forEachIndexed { index, item ->
+                if (item.key == "large_payment") {
+                    LargePaymentRow(
+                        title = item.title,
+                        description = item.description,
+                        threshold = settings.largePaymentThreshold,
+                        currency = settings.currency,
+                        editing = thresholdEditing,
+                        saving = thresholdSaving,
+                        serverError = thresholdError,
+                        onEdit = onEditThreshold,
+                        onSave = onSaveThreshold,
+                    )
+                } else {
+                    BuiltinRow(item.title, item.description)
+                }
+                if (index != settings.builtins.lastIndex) Hairline()
+            }
+        }
+        // 读取失败时仍保留上面的内置项；这里只放一行安静的提示和重试入口。
+        if (error != null && !loading) {
+            Hairline()
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "默认规则读取失败：$error",
+                    fontSize = 11.sp,
+                    color = Flux.text4,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "重试",
+                    fontSize = 11.5.sp,
+                    color = Flux.accent,
+                    modifier = Modifier
+                        .padding(start = 10.dp)
+                        .clickable { onRetry() },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DefaultCardHint(text: String) {
+    Text(
+        text,
+        fontSize = 12.5.sp,
+        color = Flux.text3,
+        lineHeight = 19.sp,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+    )
+}
+
+@Composable
+private fun BuiltinRow(title: String, description: String) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp)) {
+        Text(title, fontSize = 14.sp, fontWeight = FontWeight(460), color = Flux.text)
         Text(
-            "没有规则时，Bot 的操作会直接执行。只有命中下面规则的操作，才会先停下来问你。",
-            fontSize = 12.sp,
-            color = Flux.text2,
-            lineHeight = 18.sp,
-            modifier = Modifier.padding(top = 5.dp),
+            description,
+            fontSize = 11.5.sp,
+            color = Flux.text3,
+            lineHeight = 17.sp,
+            modifier = Modifier.padding(top = 3.dp),
         )
+    }
+}
+
+@Composable
+private fun LargePaymentRow(
+    title: String,
+    description: String,
+    threshold: Double,
+    currency: String,
+    editing: Boolean,
+    saving: Boolean,
+    serverError: String,
+    onEdit: (Boolean) -> Unit,
+    onSave: (Double) -> Unit,
+) {
+    val amount = if (currency == "CNY") {
+        "¥" + formatThreshold(threshold)
+    } else {
+        formatThreshold(threshold) + " " + currency
+    }
+    Column {
         Row(
-            Modifier.padding(top = 9.dp),
+            Modifier.fillMaxWidth()
+                .clickable { onEdit(!editing) }
+                .padding(horizontal = 16.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FIcon(FIcon.Shield, size = 13.dp, color = Flux.accent)
+            Column(Modifier.weight(1f)) {
+                Text(title, fontSize = 14.sp, fontWeight = FontWeight(460), color = Flux.text)
+                Text(
+                    description,
+                    fontSize = 11.5.sp,
+                    color = Flux.text3,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(amount, fontSize = 12.sp, color = Flux.text3)
             Spacer(Modifier.width(6.dp))
-            Text(
-                "规则对你名下所有 Bot 生效，不会只限制某一个 Bot。",
-                fontSize = 11.5.sp,
-                color = Flux.text3,
-                lineHeight = 16.sp,
+            FIcon(
+                if (editing) FIcon.ChevronDown else FIcon.ChevronRight,
+                size = 14.dp,
+                color = Flux.text4,
             )
+        }
+        if (editing) {
+            ThresholdEditor(
+                value = threshold,
+                saving = saving,
+                serverError = serverError,
+                onSave = onSave,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ThresholdEditor(
+    value: Double,
+    saving: Boolean,
+    serverError: String,
+    onSave: (Double) -> Unit,
+) {
+    var input by remember(value) { mutableStateOf(formatThreshold(value)) }
+    var localError by remember(value) { mutableStateOf("") }
+    val message = localError.ifBlank { serverError }
+
+    Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp)) {
+        Text(
+            "金额阈值（元）",
+            fontSize = 11.5.sp,
+            color = Flux.text3,
+            modifier = Modifier.padding(bottom = 7.dp),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) {
+                FluxInput(
+                    input,
+                    { raw ->
+                        input = raw.filter { c -> c.isDigit() || c == '.' }
+                        localError = ""
+                    },
+                    placeholder = "200",
+                    height = 46.dp,
+                    keyboardType = KeyboardType.Decimal,
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            EditorButton(
+                if (saving) "保存中…" else "保存",
+                primary = true,
+                modifier = Modifier.width(88.dp),
+                enabled = !saving,
+            ) {
+                val problem = validateThresholdInput(input)
+                if (problem != null) {
+                    localError = problem
+                } else {
+                    input.trim().toDoubleOrNull()?.let(onSave)
+                }
+            }
+        }
+        if (message.isNotBlank()) {
+            Text(
+                message,
+                fontSize = 11.5.sp,
+                color = Flux.danger,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(start = 4.dp, top = 7.dp),
+            )
+        }
+        Text(
+            "达到这个金额的付款，Bot 会先停下来等你确认。",
+            fontSize = 11.sp,
+            color = Flux.text4,
+            lineHeight = 17.sp,
+            modifier = Modifier.padding(start = 4.dp, top = 7.dp),
+        )
+    }
+}
+
+/** Bot 自己加的规则：只展示来源与内容，用户可以直接删除。 */
+@Composable
+private fun BotRuleRow(
+    rule: ApprovalRule,
+    creator: String,
+    onDelete: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 13.dp, bottom = 13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(Flux.panel3),
+            contentAlignment = Alignment.Center,
+        ) {
+            FIcon(ruleTypeIcon(rule.type), size = 17.dp, color = Flux.accent2)
+        }
+        Spacer(Modifier.width(11.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                rule.displayDescription(),
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight(460),
+                color = if (rule.enabled) Flux.text else Flux.text3,
+                lineHeight = 19.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                rule.paramsSummary(),
+                fontSize = 11.sp,
+                color = Flux.text3,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            Row(
+                Modifier.padding(top = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Pill("由 $creator 设置", color = Flux.warn, bg = Flux.warnSoft)
+                if (!rule.enabled) Pill("已停用", color = Flux.text3, bg = Flux.panel2)
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        Box(
+            Modifier.size(24.dp).clip(CircleShape).clickable { onDelete() },
+            contentAlignment = Alignment.Center,
+        ) {
+            FIcon(FIcon.Trash, size = 13.dp, color = Flux.danger)
         }
     }
 }
@@ -331,7 +676,6 @@ private fun ErrorCard(error: String, onRetry: () -> Unit) {
 @Composable
 private fun RuleRow(
     rule: ApprovalRule,
-    creator: String,
     onToggle: (Boolean) -> Unit,
     onDelete: () -> Unit,
     onEdit: () -> Unit,
@@ -376,11 +720,6 @@ private fun RuleRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Pill(
-                    "创建者：$creator",
-                    color = if (rule.createdByKind == "bot") Flux.warn else Flux.accent,
-                    bg = if (rule.createdByKind == "bot") Color(0x1FE8B25E) else Flux.accentSoft,
-                )
                 Pill("全局生效", color = Flux.text3, bg = Flux.panel2)
             }
         }
@@ -583,6 +922,7 @@ private fun RuleForm(
                 ChoiceChip("人民币 · CNY", currency == "CNY") { currency = "CNY" }
                 ChoiceChip("美元 · USD", currency == "USD") { currency = "USD" }
             }
+            // 这是用户自建的 payment_amount_over 规则：命中条件确实是「超过」。
             FormHint("支付金额超过阈值时，先让你确认再扣款。")
         }
 

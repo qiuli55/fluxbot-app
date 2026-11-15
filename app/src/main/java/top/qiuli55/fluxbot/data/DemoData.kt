@@ -89,6 +89,7 @@ object DemoData {
                     rt("rt-3", "生成本周复盘", "09:00", "每周一", false),
                 ),
                 permissions = allPerms, autoMemory = true,
+                channels = listOf("feishu", "wecom"),
                 library = mainLibrary(),
             ),
             Bot(
@@ -104,6 +105,7 @@ object DemoData {
                 routines = listOf(rt("rt-rep", "生成每日快报", "21:30", "每天")),
                 permissions = mapOf("files" to true, "shell" to false, "network" to true, "apps" to true),
                 autoMemory = true,
+                channels = listOf("wechat"),
             ),
             Bot(
                 id = "b-xhs", name = "小红书", seed = "b-xhs", shape = "heart", palette = "rose",
@@ -118,6 +120,7 @@ object DemoData {
                 routines = emptyList(),
                 permissions = mapOf("files" to false, "shell" to false, "network" to true, "apps" to true),
                 autoMemory = true,
+                channels = listOf("dingtalk"),
             ),
             Bot(
                 id = "b-xianyu", name = "闲鱼", seed = "b-xianyu", shape = "drop", palette = "sky",

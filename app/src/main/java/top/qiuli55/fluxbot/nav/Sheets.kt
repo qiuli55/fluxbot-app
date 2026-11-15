@@ -80,8 +80,10 @@ import top.qiuli55.fluxbot.data.RemoteRoutineDetail
 import top.qiuli55.fluxbot.data.RemoteVaultLogin
 import top.qiuli55.fluxbot.data.VaultSecrets
 import top.qiuli55.fluxbot.data.appendJournal
+import top.qiuli55.fluxbot.data.createMcpConnection
 import top.qiuli55.fluxbot.data.createSkill
 import top.qiuli55.fluxbot.data.createSubtask
+import top.qiuli55.fluxbot.data.linkChannel
 import top.qiuli55.fluxbot.data.deleteProfile
 import top.qiuli55.fluxbot.data.deleteRoutineDetail
 import top.qiuli55.fluxbot.data.getPage
@@ -97,6 +99,7 @@ import top.qiuli55.fluxbot.data.updateRoutineDetail
 import top.qiuli55.fluxbot.data.updateSkill
 import top.qiuli55.fluxbot.ip.FloAvatarStill
 import top.qiuli55.fluxbot.screens.BotAvatar
+import top.qiuli55.fluxbot.screens.McpAddForm
 import top.qiuli55.fluxbot.ui.EmptyCard
 import top.qiuli55.fluxbot.ui.FIcon
 import top.qiuli55.fluxbot.ui.Flux
@@ -120,6 +123,8 @@ sealed interface Sheet {
     data class Computer(val botId: String) : Sheet
     data class Permissions(val botId: String) : Sheet
     data class Model(val botId: String) : Sheet
+    data class ChannelBot(val channel: String, val label: String) : Sheet
+    data object McpAdd : Sheet
     data object Timezone : Sheet
     data object Appearance : Sheet
     data object Language : Sheet
@@ -269,6 +274,8 @@ private fun SheetBody(sheet: Sheet) {
         is Sheet.Computer -> ComputerSheet(sheet.botId)
         is Sheet.Permissions -> PermissionsSheet(sheet.botId)
         is Sheet.Model -> ModelSheet(sheet.botId)
+        is Sheet.ChannelBot -> ChannelBotSheet(sheet.channel, sheet.label)
+        Sheet.McpAdd -> McpAddSheet()
         Sheet.Timezone -> TimezoneSheet()
         Sheet.Appearance -> AppearanceSheet()
         Sheet.Language -> LanguageSheet()
@@ -957,6 +964,91 @@ private fun ModelSheet(botId: String) {
     }
 }
 
+/** 通道连接：从设置页的「通道」分区进入，选一个 Bot 绑定到这个通道。 */
+@Composable
+private fun ChannelBotSheet(channel: String, label: String) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val bots = store.current().bots.filter { !it.group }
+    var busy by remember { mutableStateOf("") }
+
+    SheetFrame("连接$label") {
+        if (bots.isEmpty()) {
+            SheetHint("还没有 Bot。先创建一个，再来连接$label。", top = 0)
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton("新建 Bot") {
+                ui.closeSheet()
+                ui.push(Route.Create)
+            }
+            return@SheetFrame
+        }
+        SheetHint("选一个 Bot 来接收和回复${label}消息；一个通道同一时间只绑定一个 Bot。", top = 0)
+        Spacer(Modifier.height(10.dp))
+        bots.forEach { bot ->
+            PickRow(bot, selected = busy == bot.id) {
+                if (busy.isNotEmpty()) return@PickRow
+                busy = bot.id
+                ui.haptic(6)
+                ui.scope.launch {
+                    try {
+                        val link = store.api.linkChannel(channel, bot.id)
+                        Log.d("FluxBot/V040", "channel linked channel=$channel")
+                        ui.refreshData()
+                        runCatching { store.refreshRemoteBots() }
+                        ui.closeSheet()
+                        ui.showToast("已连接$label · " + link.botName.ifBlank { bot.name })
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w("FluxBot/V040", "link channel failed channel=$channel", e)
+                        ui.showToast(e.message ?: "连接失败")
+                    } finally {
+                        busy = ""
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+/** 添加自定义 MCP 服务：表单校验在前端完成，连接结果由服务器返回。 */
+@Composable
+private fun McpAddSheet() {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+
+    SheetFrame("自定义 MCP") {
+        McpAddForm(busy = busy, error = error) { value ->
+            busy = true
+            error = ""
+            ui.scope.launch {
+                try {
+                    val created = store.api.createMcpConnection(
+                        name = value.name,
+                        url = value.url,
+                        headerName = value.headerName,
+                        headerValue = value.headerValue,
+                    )
+                    Log.d("FluxBot/V040", "mcp connection added id=${created.id} tools=${created.toolCount}")
+                    ui.refreshData()
+                    ui.closeSheet()
+                    ui.showToast("已连接，发现 ${created.toolCount} 个工具")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("FluxBot/V040", "create mcp connection failed", e)
+                    error = e.message ?: "连接失败，请检查地址和鉴权头"
+                } finally {
+                    busy = false
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun PermissionsSheet(botId: String) {
     val store = LocalStore.current
@@ -968,7 +1060,7 @@ private fun PermissionsSheet(botId: String) {
         "apps" to ("使用连接应用" to "读取你已连接的应用数据"),
     )
     SheetFrame("权限") {
-        SheetHint("随时可以收回，正在执行的任务会立即停止。", top = 0)
+        SheetHint("默认权限全开。可以在这里单独关掉某一项；正在执行的任务会在下一步停下。", top = 0)
         Spacer(Modifier.height(4.dp))
         items.forEach { (key, pair) ->
             Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
@@ -983,7 +1075,7 @@ private fun PermissionsSheet(botId: String) {
                         modifier = Modifier.padding(top = 3.dp),
                     )
                 }
-                FluxSwitch(bot.permissions[key] == true) { store.togglePermission(botId, key) }
+                FluxSwitch(bot.permissions[key] ?: true) { store.togglePermission(botId, key) }
             }
         }
     }

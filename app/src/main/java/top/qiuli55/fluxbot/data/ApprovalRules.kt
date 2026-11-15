@@ -119,6 +119,7 @@ fun ApprovalRule.paramsSummary(): String {
 
 fun channelLabel(key: String): String = when (key) {
     "feishu" -> "飞书"
+    "wechat" -> "微信"
     "wecom" -> "企业微信"
     "dingtalk" -> "钉钉"
     else -> key
@@ -128,5 +129,11 @@ fun channelLabel(key: String): String = when (key) {
 fun ApprovalRule.creatorLabel(botNameResolver: (String) -> String? = { null }): String {
     if (createdByKind != "bot") return "我"
     val name = createdByBotName.ifBlank { botNameResolver(createdByBotId).orEmpty() }
-    return "Bot：${name.ifBlank { "未知 Bot" }}"
+    return "Bot：${name.ifBlank { "已删除的 Bot" }}"
+}
+
+/** Bot 规则行里的来源说明；Bot 已删除时显示固定兜底文案。 */
+fun ApprovalRule.botCreatorLabel(botNameResolver: (String) -> String? = { null }): String {
+    val name = createdByBotName.ifBlank { botNameResolver(createdByBotId).orEmpty() }
+    return name.ifBlank { "已删除的 Bot" }
 }

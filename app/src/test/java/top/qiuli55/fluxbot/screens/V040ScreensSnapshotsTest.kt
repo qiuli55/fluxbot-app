@@ -25,8 +25,6 @@ import top.qiuli55.fluxbot.R
 import top.qiuli55.fluxbot.data.Message
 import top.qiuli55.fluxbot.data.PendingDecision
 import top.qiuli55.fluxbot.data.RemoteBrowserStatus
-import top.qiuli55.fluxbot.data.RemoteChannelError
-import top.qiuli55.fluxbot.data.RemoteChannelStatus
 import top.qiuli55.fluxbot.data.RemoteJournalEntry
 import top.qiuli55.fluxbot.data.RemoteOutboundDraft
 import top.qiuli55.fluxbot.data.RemotePage
@@ -129,37 +127,6 @@ class V040ScreensSnapshotsTest {
             bodyChars = 860,
             enabled = false,
             updatedAt = "2026-11-12 18:20",
-        ),
-    )
-
-    private val channels = listOf(
-        RemoteChannelStatus(
-            channel = "feishu",
-            label = "飞书",
-            configStatus = "configured",
-            inboundConfigured = true,
-            outboundConfigured = true,
-            missingEnv = emptyList(),
-            lastSendAt = "2026-11-16 09:30",
-            lastReceiveAt = "2026-11-16 09:31",
-            recentErrors = emptyList(),
-        ),
-        RemoteChannelStatus(
-            channel = "wecom",
-            label = "企业微信",
-            configStatus = "partial",
-            inboundConfigured = true,
-            outboundConfigured = false,
-            missingEnv = listOf("WECOM_AGENT_ID", "WECOM_SECRET"),
-            lastSendAt = "",
-            lastReceiveAt = "2026-11-15 18:00",
-            recentErrors = listOf(
-                RemoteChannelError(
-                    time = "2026-11-15 18:01",
-                    message = "回调签名校验失败",
-                    source = "inbound",
-                ),
-            ),
         ),
     )
 
@@ -351,7 +318,6 @@ class V040ScreensSnapshotsTest {
                     "next" to "2026-11-23 09:00",
                 ),
             ),
-            onOpenSubtask = null,
             onOpenRoutine = {},
             onPauseRoutine = {},
         )
@@ -392,11 +358,6 @@ class V040ScreensSnapshotsTest {
             onToggle = {},
             onDelete = {},
         )
-    }
-
-    @Test
-    fun channels() = page("21-channels") {
-        ChannelsContent(channels = channels, loading = false, error = "", onRetry = {})
     }
 
     @Test

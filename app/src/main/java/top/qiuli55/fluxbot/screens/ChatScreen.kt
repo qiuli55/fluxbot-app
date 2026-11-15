@@ -482,13 +482,12 @@ fun ChatScreen(botId: String) {
                     )
                 }
             }
-            items(messages, key = { it.id }) { msg ->
+            items(visibleMessages(messages), key = { it.id }) { msg ->
                 MessageRow(
                     msg = msg,
                     senderBot = groupMembers.firstOrNull { it.name == msg.sender },
                     onLongPress = { ui.sheet = Sheet.MessageMenu(botId, msg.id, msg.displayText()) },
                     onComponentAction = ::handleComponentAction,
-                    onOpenSubtask = { ui.push(Route.BotDetail(botId, tab = 2)) },
                     onOpenRoutine = { routineId ->
                         ui.sheet = Sheet.RoutineDetail(botId, routineId)
                     },
@@ -670,6 +669,18 @@ private fun ChatHead(
     }
 }
 
+/**
+ * 子任务消息只在后台运行，不再进入对话列表。
+ *
+ * 数据与接口仍然保留，这里只负责决定哪些 kind 不渲染；
+ * 纯函数便于 JVM 测试直接覆盖。
+ */
+internal fun isHiddenMessageKind(kind: String): Boolean = kind == "subtask"
+
+/** 对话列表真正渲染的消息：过滤掉后台子任务。 */
+internal fun visibleMessages(messages: List<Message>): List<Message> =
+    messages.filterNot { isHiddenMessageKind(it.kind) }
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun MessageRow(
@@ -679,12 +690,13 @@ internal fun MessageRow(
     /** 生产路径传入真实触感；截图脚手架保持空回调。 */
     onLikeHaptic: () -> Unit = {},
     onComponentAction: (ComponentAction) -> Unit = {},
-    onOpenSubtask: (() -> Unit)? = null,
     onOpenRoutine: ((String) -> Unit)? = null,
     onPauseRoutine: ((String) -> Unit)? = null,
 ) {
-    if (msg.kind == "subtask" || msg.kind == "routine_created" || msg.kind == "decision_result") {
-        InlineEventCard(msg, onOpenSubtask, onOpenRoutine, onPauseRoutine)
+    // 子任务已经不再出现在界面上：数据与接口保留，只是不渲染。
+    if (isHiddenMessageKind(msg.kind)) return
+    if (msg.kind == "routine_created" || msg.kind == "decision_result") {
+        InlineEventCard(msg, onOpenRoutine, onPauseRoutine)
         return
     }
     val user = msg.role == "user"
@@ -785,11 +797,10 @@ internal fun MessageRow(
     }
 }
 
-/** 对话里的系统事件卡：后台子任务 / Bot 创建的例程 / 已处理审批。 */
+/** 对话里的系统事件卡：Bot 创建的例程 / 已处理审批。 */
 @Composable
 internal fun InlineEventCard(
     msg: Message,
-    onOpenSubtask: (() -> Unit)?,
     onOpenRoutine: ((String) -> Unit)?,
     onPauseRoutine: ((String) -> Unit)?,
 ) {
@@ -803,61 +814,6 @@ internal fun InlineEventCard(
             .padding(horizontal = 14.dp, vertical = 12.dp),
     ) {
         when (msg.kind) {
-            "subtask" -> {
-                val status = msg.payload["status"].orEmpty()
-                val running = status in setOf(
-                    "running", "executing", "queued", "pending", "waiting_for_user_decision",
-                )
-                val title = msg.payload["title"].orEmpty().ifBlank { msg.displayText() }
-                val summary = msg.payload["summary"].orEmpty()
-                    .ifBlank { msg.payload["result"].orEmpty() }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier.size(7.dp).clip(CircleShape)
-                            .background(if (running) Flux.warn else Flux.text4),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        title.ifBlank { "后台子任务" },
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight(560),
-                        color = Flux.text,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Pill(
-                        when {
-                            running -> "运行中"
-                            status == "completed" -> "已完成"
-                            status == "cancelled" -> "已取消"
-                            status == "failed" -> "失败"
-                            else -> "已结束"
-                        },
-                        if (running) Flux.warn else if (status == "failed") Flux.danger else Flux.text3,
-                        if (running) Color(0x1FE8B25E) else Flux.panel3,
-                    )
-                }
-                Spacer(Modifier.height(5.dp))
-                Text(
-                    if (running) "运行中 · 不占用对话" else summary.ifBlank { "结果已回到对话" },
-                    fontSize = 11.5.sp,
-                    color = Flux.text3,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (onOpenSubtask != null) {
-                    Text(
-                        "查看子任务",
-                        fontSize = 11.5.sp,
-                        color = Flux.accent,
-                        modifier = Modifier
-                            .padding(top = 8.dp)
-                            .clickable { onOpenSubtask() },
-                    )
-                }
-            }
             "routine_created" -> {
                 val routineId = msg.payload["routine_id"].orEmpty()
                     .ifBlank { msg.payload["id"].orEmpty() }
@@ -1377,7 +1333,7 @@ internal fun ChatSnapshot(
                             )
                         }
                     }
-                    items(messages, key = { it.id }) { msg ->
+                    items(visibleMessages(messages), key = { it.id }) { msg ->
                         MessageRow(
                             msg = msg,
                             senderBot = groupMembers.firstOrNull { it.name == msg.sender },

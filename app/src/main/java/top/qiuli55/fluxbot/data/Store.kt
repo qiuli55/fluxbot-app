@@ -399,6 +399,7 @@ class Store(context: Context) {
                         taskId = r.taskId.takeUnless { it == "null" }.orEmpty(),
                         chatTaskId = r.chatTaskId.takeUnless { it == "null" }.orEmpty(),
                         remote = true,
+                        channels = r.channels,
                     )
                 } else {
                     bots.map {
@@ -413,12 +414,19 @@ class Store(context: Context) {
                             chatTaskId = r.chatTaskId.takeIf { id -> id.isNotEmpty() && id != "null" }
                                 ?: it.chatTaskId,
                             remote = true,
+                            channels = r.channels,
                         ) else it
                     }
                 }
             }
             acc.copy(bots = bots)
         }
+    }
+
+    /** 重新拉取远端 Bot 列表；通道变更后用它刷新首页标记。 */
+    suspend fun refreshRemoteBots() {
+        val remote = api.listBots()
+        if (remote.isNotEmpty()) mergeRemoteBots(remote)
     }
 
     fun setTaskId(botId: String, taskId: String) = updateBot(botId) { it.copy(taskId = taskId) }
@@ -498,7 +506,8 @@ class Store(context: Context) {
     fun setWorking(botId: String, working: Boolean) = updateBot(botId) { it.copy(working = working) }
 
     fun togglePermission(botId: String, key: String) = updateBot(botId) {
-        it.copy(permissions = it.permissions + (key to !(it.permissions[key] ?: false)))
+        // 服务端默认权限全开；没有显式记录的权限按开启处理，切换后即为关闭。
+        it.copy(permissions = it.permissions + (key to !(it.permissions[key] ?: true)))
     }
 
     fun setAutoMemory(botId: String, on: Boolean) = updateBot(botId) { it.copy(autoMemory = on) }

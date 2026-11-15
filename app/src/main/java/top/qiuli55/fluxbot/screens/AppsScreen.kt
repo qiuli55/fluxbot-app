@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -37,9 +38,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.DemoData
 import top.qiuli55.fluxbot.data.RemoteConnector
+import top.qiuli55.fluxbot.data.RemoteMcpConnection
 import top.qiuli55.fluxbot.data.Store
+import top.qiuli55.fluxbot.data.deleteMcpConnection
+import top.qiuli55.fluxbot.data.listMcpConnections
 import top.qiuli55.fluxbot.nav.AppUi
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
@@ -56,6 +61,10 @@ fun AppsScreen() {
     val connected = store.current().connected
     val signedIn = store.api.authToken.isNotBlank()
     var connectors by remember { mutableStateOf<List<RemoteConnector>>(emptyList()) }
+    var mcpConnections by remember { mutableStateOf<List<RemoteMcpConnection>>(emptyList()) }
+    var mcpLoading by remember { mutableStateOf(false) }
+    var mcpError by remember { mutableStateOf("") }
+    var mcpReload by remember { mutableIntStateOf(0) }
     var cat by remember { mutableStateOf("全部") }
     var query by remember { mutableStateOf("") }
 
@@ -71,6 +80,49 @@ fun AppsScreen() {
             throw e
         } catch (e: Exception) {
             // 读取失败时保留本地占位状态，不打断应用列表。
+        }
+    }
+
+    // 自定义 MCP 与连接器一样，登录后才有远端数据；弹层关闭或删除后重新拉取。
+    LaunchedEffect(signedIn, ui.dataRevision, mcpReload) {
+        if (!signedIn) {
+            mcpConnections = emptyList()
+            return@LaunchedEffect
+        }
+        mcpLoading = true
+        try {
+            mcpConnections = store.api.listMcpConnections()
+            mcpError = ""
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("FluxBot/V040", "load mcp connections failed", e)
+            mcpError = e.message ?: "未知错误"
+        } finally {
+            mcpLoading = false
+        }
+    }
+
+    fun deleteMcp(item: RemoteMcpConnection) {
+        ui.sheet = Sheet.Confirm(
+            title = "删除 ${item.name}？",
+            text = "删除后，Bot 将不能再调用这个服务提供的工具。",
+            action = "删除",
+            danger = true,
+        ) {
+            ui.scope.launch {
+                try {
+                    store.api.deleteMcpConnection(item.id)
+                    android.util.Log.d("FluxBot/V040", "mcp connection deleted id=${item.id}")
+                    ui.showToast("已删除 ${item.name}")
+                    mcpReload++
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w("FluxBot/V040", "delete mcp connection failed id=${item.id}", e)
+                    ui.showToast(e.message ?: "删除失败")
+                }
+            }
         }
     }
 
@@ -152,6 +204,30 @@ fun AppsScreen() {
                     } else "CalDAV / ICS 订阅",
                     connected = calendar?.connected == true,
                 ) { ui.push(Route.CalendarConnector) }
+
+                SectionTitle("自定义 MCP")
+                when {
+                    !signedIn -> McpHintRow("登录 Flux 账号后可以添加自定义 MCP。")
+                    mcpLoading && mcpConnections.isEmpty() -> McpHintRow("正在读取…")
+                    mcpConnections.isEmpty() && mcpError.isNotBlank() -> McpHintRow(
+                        "读取失败：$mcpError",
+                        action = "重试",
+                        onAction = { mcpReload++ },
+                    )
+                    mcpConnections.isEmpty() -> McpHintRow("还没有添加。连上一个 MCP 服务，Bot 就能用它的工具。")
+                    else -> mcpConnections.forEach { item ->
+                        McpConnectionRow(item, onDelete = { deleteMcp(item) })
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth().clickable { ui.sheet = Sheet.McpAdd }
+                        .padding(start = 4.dp, end = 4.dp, top = 12.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FIcon(FIcon.Plus, size = 15.dp, color = Flux.accent, baseline = true)
+                    Spacer(Modifier.width(7.dp))
+                    Text("添加自定义 MCP", fontSize = 13.sp, color = Flux.accent)
+                }
 
                 if (featured.isNotEmpty()) {
                     SectionTitle("推荐 · 常用")
@@ -292,6 +368,71 @@ private fun SelfHostedRow(
                 fontSize = 11.5.sp,
                 color = if (connected) Flux.accent else Flux.text2,
             )
+        }
+    }
+}
+
+@Composable
+private fun McpConnectionRow(item: RemoteMcpConnection, onDelete: () -> Unit) {
+    Column {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.size(42.dp).clip(RoundedCornerShape(10.dp)).background(Flux.panel3),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("M", fontSize = 15.sp, fontWeight = FontWeight(620), color = Flux.accent)
+            }
+            Spacer(Modifier.width(13.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    item.name,
+                    fontSize = 14.5.sp,
+                    fontWeight = FontWeight(460),
+                    color = Flux.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "${item.hostText()} · ${item.toolCountText()}",
+                    fontSize = 11.5.sp,
+                    color = Flux.text3,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Box(
+                Modifier.clickable { onDelete() }.padding(horizontal = 4.dp, vertical = 8.dp),
+            ) {
+                Text("删除", fontSize = 12.sp, color = Flux.text3)
+            }
+        }
+        Hairline()
+    }
+}
+
+@Composable
+private fun McpHintRow(text: String, action: String? = null, onAction: () -> Unit = {}) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text,
+            fontSize = 11.5.sp,
+            color = Flux.text3,
+            lineHeight = 18.sp,
+            modifier = Modifier.weight(1f),
+        )
+        if (action != null) {
+            Spacer(Modifier.width(10.dp))
+            Box(Modifier.clickable { onAction() }.padding(horizontal = 4.dp, vertical = 6.dp)) {
+                Text(action, fontSize = 12.sp, color = Flux.accent)
+            }
         }
     }
 }

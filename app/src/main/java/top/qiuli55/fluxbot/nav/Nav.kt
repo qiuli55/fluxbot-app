@@ -57,7 +57,6 @@ import top.qiuli55.fluxbot.screens.AuthScreen
 import top.qiuli55.fluxbot.screens.BotScreen
 import top.qiuli55.fluxbot.screens.BrowserScreen
 import top.qiuli55.fluxbot.screens.CalendarConnectorScreen
-import top.qiuli55.fluxbot.screens.ChannelsScreen
 import top.qiuli55.fluxbot.screens.ChatScreen
 import top.qiuli55.fluxbot.screens.CreateScreen
 import top.qiuli55.fluxbot.screens.DesktopScreen
@@ -93,7 +92,6 @@ sealed interface Route {
     data object OutboundDrafts : Route
     data object Skills : Route
     data class SkillDetail(val skillId: String) : Route
-    data object Channels : Route
     data object Browser : Route
     data object SharedMemory : Route
     data object Pages : Route
@@ -280,7 +278,6 @@ fun FluxApp(store: Store) {
                         Route.OutboundDrafts -> OutboundDraftsScreen()
                         Route.Skills -> SkillsScreen()
                         is Route.SkillDetail -> SkillDetailScreen(route.skillId)
-                        Route.Channels -> ChannelsScreen()
                         Route.Browser -> BrowserScreen()
                         Route.SharedMemory -> SharedMemoryScreen()
                         Route.Pages -> PagesScreen()

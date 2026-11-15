@@ -85,6 +85,8 @@ data class Bot(
     /** 云端路由模型（空 = 跟随平台默认）；modelKeyId 指向密钥库条目。 */
     val model: String = "",
     val modelKeyId: String = "",
+    /** 已连接到此 Bot 的通道 key；空列表表示没有通道。 */
+    val channels: List<String> = emptyList(),
 )
 
 data class Settings(
@@ -208,6 +210,7 @@ fun Bot.toJson() = JSONObject()
     .put("library", JSONArray().apply { library.forEach { put(it.toJson()) } })
     .put("model", model)
     .put("modelKeyId", modelKeyId)
+    .put("channels", JSONArray().apply { addAllStrings(channels) })
 
 fun botFromJson(o: JSONObject) = Bot(
     id = o.getString("id"), name = o.getString("name"), seed = o.getString("seed"),
@@ -232,6 +235,7 @@ fun botFromJson(o: JSONObject) = Bot(
         ?: emptyList(),
     model = o.optString("model"),
     modelKeyId = o.optString("modelKeyId"),
+    channels = parseBotChannels(o),
 )
 
 fun Settings.toJson() = JSONObject()

@@ -20,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -31,16 +32,18 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Account
 import top.qiuli55.fluxbot.data.RemoteBrowserStatus
-import top.qiuli55.fluxbot.data.RemoteChannelStatus
+import top.qiuli55.fluxbot.data.RemoteChannelLink
 import top.qiuli55.fluxbot.data.SkillSummary
 import top.qiuli55.fluxbot.data.browserStatus
-import top.qiuli55.fluxbot.data.channelStatuses
+import top.qiuli55.fluxbot.data.channelLinks
 import top.qiuli55.fluxbot.data.pageCount
 import top.qiuli55.fluxbot.data.pendingDraftCount
 import top.qiuli55.fluxbot.data.sharedMemoryCount
 import top.qiuli55.fluxbot.data.skillSummary
+import top.qiuli55.fluxbot.data.unlinkChannel
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
 import top.qiuli55.fluxbot.nav.Route
@@ -62,6 +65,11 @@ fun SettingsScreen() {
     val account = acc.account
     val settings = acc.settings
     var hub by remember { mutableStateOf(HubStats()) }
+    var links by remember { mutableStateOf<List<RemoteChannelLink>>(emptyList()) }
+    var linksLoading by remember { mutableStateOf(true) }
+    var linksError by remember { mutableStateOf("") }
+    var expandedChannel by remember { mutableStateOf("") }
+    var linksReload by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(ui.dataRevision) {
         suspend fun <T> quiet(label: String, block: suspend () -> T): T? = try {
@@ -74,12 +82,50 @@ fun SettingsScreen() {
         }
         hub = HubStats(
             skills = quiet("skills") { store.api.skillSummary() },
-            channels = quiet("channels") { store.api.channelStatuses() } ?: emptyList(),
             browser = quiet("browser") { store.api.browserStatus() },
             drafts = quiet("drafts") { store.api.pendingDraftCount() } ?: 0,
             pages = quiet("pages") { store.api.pageCount() } ?: 0,
             memory = quiet("memory") { store.api.sharedMemoryCount() } ?: 0,
         )
+    }
+
+    LaunchedEffect(ui.dataRevision, linksReload) {
+        linksLoading = true
+        try {
+            links = store.api.channelLinks()
+            linksError = ""
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("FluxBot/V040", "load channel links failed", e)
+            linksError = e.message ?: "未知错误"
+        } finally {
+            linksLoading = false
+        }
+    }
+
+    fun disconnectChannel(link: RemoteChannelLink) {
+        ui.sheet = Sheet.Confirm(
+            title = "断开${link.label}？",
+            text = "${link.botName.ifBlank { "这个 Bot" }} 将不再接收和回复${link.label}消息。",
+            action = "断开",
+            danger = true,
+        ) {
+            ui.scope.launch {
+                try {
+                    store.api.unlinkChannel(link.channel)
+                    Log.d("FluxBot/V040", "channel unlinked channel=${link.channel}")
+                    ui.showToast("已断开${link.label}")
+                    ui.refreshData()
+                    runCatching { store.refreshRemoteBots() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("FluxBot/V040", "unlink channel failed channel=${link.channel}", e)
+                    ui.showToast(e.message ?: "断开失败")
+                }
+            }
+        }
     }
 
     Column(Modifier.fillMaxSize().background(Flux.bg)) {
@@ -140,6 +186,17 @@ fun SettingsScreen() {
                 )
             }
 
+            ChannelSettingsSection(
+                links = links,
+                loading = linksLoading,
+                error = linksError,
+                expanded = expandedChannel,
+                onExpand = { expandedChannel = if (expandedChannel == it) "" else it },
+                onConnect = { ui.sheet = Sheet.ChannelBot(it.channel, it.label) },
+                onDisconnect = { disconnectChannel(it) },
+                onRetry = { linksReload++ },
+            )
+
             SectionLabel("Bot 能力")
             FluxCard {
                 ItemRow(
@@ -154,20 +211,6 @@ fun SettingsScreen() {
                     },
                     showDivider = true,
                     onClick = { ui.push(Route.Skills) },
-                )
-                ItemRow(
-                    title = "通道",
-                    sub = "飞书 / 企业微信 / 钉钉",
-                    trailing = {
-                        RowValue(
-                            if (hub.channels.isEmpty()) "—"
-                            else "${hub.channels.count { it.connected }}/${hub.channels.size} 已接入",
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        RowChevron()
-                    },
-                    showDivider = true,
-                    onClick = { ui.push(Route.Channels) },
                 )
                 ItemRow(
                     title = "浏览器",
@@ -325,7 +368,7 @@ fun SettingsScreen() {
             }
 
             Text(
-                "Flux Bot 0.4.0-beta.2 · 可交互演示\n账号由 flux.qiuli55.top 账号云统一管理",
+                "Flux Bot 0.5.0-beta.1 · 可交互演示\n账号由 flux.qiuli55.top 账号云统一管理",
                 fontSize = 11.sp,
                 color = Flux.text4,
                 lineHeight = 18.7.sp,
@@ -340,7 +383,6 @@ fun SettingsScreen() {
 
 private data class HubStats(
     val skills: SkillSummary? = null,
-    val channels: List<RemoteChannelStatus> = emptyList(),
     val browser: RemoteBrowserStatus? = null,
     val drafts: Int = 0,
     val pages: Int = 0,

@@ -31,6 +31,7 @@ object Flux {
     val accentSoft = Color(0x1F3DF5A8)
     val accentLine = Color(0x573DF5A8)
     val warn = Color(0xFFE8B25E)
+    val warnSoft = Color(0x1FE8B25E)
     val danger = Color(0xFFFF7A6E)
     val dangerSoft = Color(0x1FFF7A6E)
 

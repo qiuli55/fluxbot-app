@@ -23,6 +23,8 @@ data class RemoteBot(
     val description: String,
     val taskId: String,
     val chatTaskId: String = "",
+    /** 当前连接到这个 Bot 的通道 key（feishu / wechat / wecom / dingtalk）。 */
+    val channels: List<String> = emptyList(),
 )
 
 /** 后端异步会话里的一轮对话。 */
@@ -355,6 +357,8 @@ class Api internal constructor(
                 .put("description", "由 Flux Bot App 创建")
                 .put("avatar_shape", AvatarMap.toServerShape(shape))
                 .put("avatar_color", AvatarMap.toServerPalette(palette))
+                // 显式使用 unattended，避免新建的 Bot 比服务端默认值更严格。
+                .put("permission_mode", "unattended")
             parseBot(request("POST", "/api/v1/bots", body).getJSONObject("data"))
         }
 
@@ -970,10 +974,14 @@ class Api internal constructor(
         }
         val success = root.optBoolean("success", code in 200..299)
         if (code !in 200..299 || !success) {
-            val msg = root.optStringOrEmpty("message").ifEmpty { "请求失败（HTTP $code）" }
-            throw ApiException(msg, code, root.optStringOrEmpty("code"))
+            throw ApiException(apiErrorMessage(root, code), code, root.optStringOrEmpty("code"))
         }
         return root
+    }
+
+    /** 统一的调试日志出口：生产环境映射到 Log.d，测试里可以注入空实现。 */
+    internal fun logDebug(message: String) {
+        logger(message)
     }
 
     internal fun parseConnector(o: JSONObject): RemoteConnector {
@@ -1001,6 +1009,7 @@ class Api internal constructor(
         description = o.optStringOrEmpty("description"),
         taskId = o.optStringOrEmpty("last_task_id").takeUnless { it == "null" }.orEmpty(),
         chatTaskId = o.optStringOrEmpty("chat_task_id").takeUnless { it == "null" }.orEmpty(),
+        channels = parseBotChannels(o),
     )
 
     /** 后端列表接口通常把数组放在 data 里；也兼容 data 对象内再包一层。 */

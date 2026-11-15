@@ -45,7 +45,9 @@ class ApprovalRulesTest {
         )!!
         assertEquals("Bot：行程助手", rule.creatorLabel { id -> if (id == "bot-trip") "行程助手" else null })
         // 没有解析到名字时也不能露出内部 id
-        assertEquals("Bot：未知 Bot", rule.creatorLabel())
+        assertEquals("Bot：已删除的 Bot", rule.creatorLabel())
+        assertEquals("行程助手", rule.botCreatorLabel { id -> if (id == "bot-trip") "行程助手" else null })
+        assertEquals("已删除的 Bot", rule.botCreatorLabel())
         assertEquals("任务类型：行程规划", rule.paramsSummary())
     }
 

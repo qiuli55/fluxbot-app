@@ -185,6 +185,9 @@ private fun HomeHero(hero: Bot, onClick: () -> Unit) {
             color = Flux.text3,
             modifier = Modifier.padding(top = 4.dp),
         )
+        if (hero.channels.isNotEmpty()) {
+            BotChannelMarkers(hero.channels, Modifier.padding(top = 8.dp))
+        }
         Box(Modifier.padding(top = 10.dp)) {
             Text("")
         }
@@ -193,7 +196,7 @@ private fun HomeHero(hero: Bot, onClick: () -> Unit) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun BotRow(
+internal fun BotRow(
     bot: Bot,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -237,6 +240,9 @@ private fun BotRow(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 4.dp),
             )
+            if (bot.channels.isNotEmpty()) {
+                BotChannelMarkers(bot.channels, Modifier.padding(top = 6.dp))
+            }
         }
     }
 }

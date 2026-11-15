@@ -19,6 +19,8 @@ import org.junit.Test
 import top.qiuli55.fluxbot.R
 import top.qiuli55.fluxbot.data.ApprovalRule
 import top.qiuli55.fluxbot.data.ApprovalRuleType
+import top.qiuli55.fluxbot.data.ApprovalSettings
+import top.qiuli55.fluxbot.data.BuiltinApprovalRule
 import top.qiuli55.fluxbot.ui.Flux
 import top.qiuli55.fluxbot.ui.FluxTheme
 
@@ -86,6 +88,28 @@ class ApprovalRulesSnapshotsTest {
         ),
     )
 
+    private val sampleSettings = ApprovalSettings(
+        largePaymentThreshold = 200.0,
+        currency = "CNY",
+        builtins = listOf(
+            BuiltinApprovalRule(
+                key = "large_payment",
+                title = "大额付款",
+                description = "单笔 200 元及以上",
+            ),
+            BuiltinApprovalRule(
+                key = "abnormal_payment",
+                title = "异常支付",
+                description = "陌生收款方、短时间重复付款、金额远超近期平均",
+            ),
+            BuiltinApprovalRule(
+                key = "delete_data",
+                title = "删除资料",
+                description = "删文件、删数据库记录、删聊天记录和记忆、删 Bot、rm -rf 这类命令",
+            ),
+        ),
+    )
+
     private fun page(name: String, content: @Composable () -> Unit) {
         paparazzi.snapshot(name = name) {
             FluxTheme {
@@ -101,6 +125,7 @@ class ApprovalRulesSnapshotsTest {
     fun approvalRulesList() = page("15-settings-approval-rules") {
         ApprovalRulesPage(
             rules = sampleRules,
+            settings = sampleSettings,
             botNameFor = { id -> if (id == "bot-trip") "行程助手" else null },
         )
     }
@@ -109,6 +134,7 @@ class ApprovalRulesSnapshotsTest {
     fun addPaymentRule() = page("16-settings-add-payment-rule") {
         ApprovalRulesPage(
             rules = sampleRules,
+            settings = sampleSettings,
             botNameFor = { id -> if (id == "bot-trip") "行程助手" else null },
             editor = RuleEditorState.Edit(ApprovalRuleType.PAYMENT),
         )
@@ -118,6 +144,7 @@ class ApprovalRulesSnapshotsTest {
     fun addCommandRule() = page("17-settings-add-command-task-rule") {
         ApprovalRulesPage(
             rules = sampleRules,
+            settings = sampleSettings,
             botNameFor = { id -> if (id == "bot-trip") "行程助手" else null },
             editor = RuleEditorState.Edit(ApprovalRuleType.COMMAND),
         )

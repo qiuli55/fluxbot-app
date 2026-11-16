@@ -33,7 +33,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
@@ -75,6 +75,7 @@ import kotlinx.coroutines.launch
 import top.qiuli55.fluxbot.data.Bot
 import org.json.JSONObject
 import top.qiuli55.fluxbot.data.ComponentAction
+import top.qiuli55.fluxbot.data.ComponentNode
 import top.qiuli55.fluxbot.data.Message
 import top.qiuli55.fluxbot.data.PendingDecision
 import top.qiuli55.fluxbot.data.listRoutineDetails
@@ -323,6 +324,8 @@ fun ChatScreen(botId: String) {
     fun submit(raw: String) {
         val text = raw.trim()
         if (text.isEmpty()) return
+        // 用户在输入框直接发言：此前还没作答的选择卡视为跳过，之后不可再提交。
+        store.skipPendingChoices(botId)
         input = ""
         store.addMessage(botId, "user", text)
         store.setWorking(botId, true)
@@ -451,6 +454,32 @@ fun ChatScreen(botId: String) {
         }
     }
 
+    /**
+     * 选择卡提交：把选择结果作为一条普通用户消息发回对话（走与输入框相同的
+     * addMessage + startTurn 路径）。本地先落「已答」状态，再处理卡上已有的
+     * 服务端动作（决策卡仍走 respondDecision），最后发送回复。
+     */
+    fun handleChoiceSubmit(
+        msg: Message,
+        choice: ComponentNode.Choice,
+        selectedIds: List<String>,
+        custom: String,
+    ) {
+        val reply = choiceReplyText(choice, selectedIds, custom)
+        if (reply.isBlank()) return
+        store.setChoiceState(botId, msg.id, "answered", selectedIds, custom.trim())
+        val action = choice.action
+        if (action != null) {
+            when {
+                action.type == "client" -> handleComponentAction(action)
+                action.type == "server" && action.decisionId.isNotBlank() ->
+                    respondDecision(action.option.ifBlank { "允许" })
+                // 通用 choice 没有服务端动作：不发明新动作名，只发用户回复。
+            }
+        }
+        submit(reply)
+    }
+
     Column(Modifier.fillMaxSize().background(Flux.bg).imePadding()) {
         ChatHead(
             bot = bot,
@@ -482,12 +511,15 @@ fun ChatScreen(botId: String) {
                     )
                 }
             }
-            items(messages, key = { it.id }) { msg ->
+            val lastUserIndex = messages.indexOfLast { it.role == "user" }
+            itemsIndexed(messages, key = { _, msg -> msg.id }) { index, msg ->
                 MessageRow(
                     msg = msg,
                     senderBot = groupMembers.firstOrNull { it.name == msg.sender },
                     onLongPress = { ui.sheet = Sheet.MessageMenu(botId, msg.id, msg.displayText()) },
                     onComponentAction = ::handleComponentAction,
+                    choiceState = choiceCardState(msg, hasLaterUserMessage = lastUserIndex > index),
+                    onChoiceSubmit = ::handleChoiceSubmit,
                     onOpenSubtask = { ui.push(Route.BotDetail(botId, tab = 2)) },
                     onOpenRoutine = { routineId ->
                         ui.sheet = Sheet.RoutineDetail(botId, routineId)
@@ -679,6 +711,9 @@ internal fun MessageRow(
     /** 生产路径传入真实触感；截图脚手架保持空回调。 */
     onLikeHaptic: () -> Unit = {},
     onComponentAction: (ComponentAction) -> Unit = {},
+    choiceState: ChoiceCardState = ChoiceCardState.Pending,
+    choicePreview: ChoicePreview? = null,
+    onChoiceSubmit: (Message, ComponentNode.Choice, List<String>, String) -> Unit = { _, _, _, _ -> },
     onOpenSubtask: (() -> Unit)? = null,
     onOpenRoutine: ((String) -> Unit)? = null,
     onPauseRoutine: ((String) -> Unit)? = null,
@@ -738,7 +773,15 @@ internal fun MessageRow(
                         ),
                 ) {
                     if (hasComponent) {
-                        ComponentView(msg.component, onComponentAction)
+                        ComponentView(
+                            msg.component,
+                            onComponentAction,
+                            choiceState = choiceState,
+                            choicePreview = choicePreview,
+                            onChoiceSubmit = { choice, ids, custom ->
+                                onChoiceSubmit(msg, choice, ids, custom)
+                            },
+                        )
                     } else {
                         Text(
                             msg.displayText(),
@@ -1332,6 +1375,9 @@ internal fun ChatSnapshot(
     fontFamily: FontFamily? = null,
     onAction: (String) -> Unit = {},
     onComponentAction: (ComponentAction) -> Unit = {},
+    /** 截图脚手架：显式指定选择卡状态 / 初始展开与勾选。 */
+    choiceState: ChoiceCardState? = null,
+    choicePreview: ChoicePreview? = null,
 ) {
     FluxTheme {
         val inheritedStyle = LocalTextStyle.current
@@ -1377,12 +1423,16 @@ internal fun ChatSnapshot(
                             )
                         }
                     }
-                    items(messages, key = { it.id }) { msg ->
+                    val lastUserIndex = messages.indexOfLast { it.role == "user" }
+                    itemsIndexed(messages, key = { _, msg -> msg.id }) { index, msg ->
                         MessageRow(
                             msg = msg,
                             senderBot = groupMembers.firstOrNull { it.name == msg.sender },
                             onLongPress = {},
                             onComponentAction = onComponentAction,
+                            choiceState = choiceState
+                                ?: choiceCardState(msg, hasLaterUserMessage = lastUserIndex > index),
+                            choicePreview = choicePreview,
                         )
                     }
                     if (typing) {

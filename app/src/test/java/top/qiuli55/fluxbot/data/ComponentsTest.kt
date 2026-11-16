@@ -114,6 +114,83 @@ class ComponentsTest {
     }
 
     @Test
+    fun parsesChoiceHintCustomInputAndOptionImage() {
+        val node = JSONObject().put("type", "choice")
+            .put("name", "tasks")
+            .put("multiple", true)
+            .put("hint", "选择所有适用项")
+            .put("allow_custom", true)
+            .put(
+                "options",
+                JSONArray()
+                    .put(
+                        JSONObject().put("id", "a").put("label", "先回收到")
+                            .put(
+                                "image",
+                                JSONObject().put("delivery_id", "delivery-1").put("index", 3),
+                            ),
+                    )
+                    .put(
+                        JSONObject().put("id", "b").put("label", "定时任务")
+                            .put("image", "https://cdn.example.com/b.png"),
+                    )
+                    .put(JSONObject().put("id", "c").put("label", "纯文字").put("image", JSONObject())),
+            )
+        val choice = parseComponentEnvelope(envelope(node))!!.root as ComponentNode.Choice
+
+        assertTrue(choice.multiple)
+        assertEquals("选择所有适用项", choice.hint)
+        assertTrue(choice.allowCustom)
+        assertEquals(3, choice.options.size)
+        assertEquals("delivery-1", choice.options[0].image?.deliveryId)
+        assertEquals("https://cdn.example.com/b.png", choice.options[1].image?.url)
+        assertNull(choice.options[2].image)
+    }
+
+    @Test
+    fun choiceWithoutNewFieldsKeepsLegacyDefaults() {
+        val node = JSONObject().put("type", "choice").put(
+            "options",
+            JSONArray().put(JSONObject().put("id", "a").put("label", "早班")),
+        )
+        val choice = parseComponentEnvelope(envelope(node))!!.root as ComponentNode.Choice
+        assertEquals("", choice.hint)
+        assertTrue(!choice.allowCustom)
+        assertNull(choice.options.single().image)
+    }
+
+    @Test
+    fun choiceNewFieldsSurviveJsonRoundTrip() {
+        val original = ComponentNode.Choice(
+            name = "tasks",
+            multiple = true,
+            hint = "选择所有适用项",
+            allowCustom = true,
+            options = listOf(
+                ChoiceOption("a", "先回收到", ChoiceImage(uploadId = "up-1")),
+                ChoiceOption("b", "定时任务", ChoiceImage(url = "https://cdn.example.com/b.png")),
+            ),
+        )
+        val reparsed = parseComponentNode(original.toJson()) as ComponentNode.Choice
+        assertEquals("选择所有适用项", reparsed.hint)
+        assertTrue(reparsed.allowCustom)
+        assertEquals("up-1", reparsed.options[0].image?.uploadId)
+        assertEquals("https://cdn.example.com/b.png", reparsed.options[1].image?.url)
+    }
+
+    @Test
+    fun containsChoiceFindsNestedChoice() {
+        val card = ComponentNode.Card(
+            children = listOf(
+                ComponentNode.Text("问题"),
+                ComponentNode.Choice(options = listOf(ChoiceOption("a", "A"))),
+            ),
+        )
+        assertTrue(card.containsChoice())
+        assertTrue(!ComponentNode.Text("纯文字").containsChoice())
+    }
+
+    @Test
     fun statusAliasNormalizesToProgress() {
         val parsed = parseComponentEnvelope(
             envelope(

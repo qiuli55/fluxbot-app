@@ -395,10 +395,11 @@ class Store(context: Context) {
                         time = clock(), unread = null, working = false, hero = false,
                         computer = "云端 · flux-bot",
                         messages = emptyList(), memories = emptyList(), routines = emptyList(),
-                        permissions = emptyMap(), autoMemory = true,
+                        permissions = r.permissions, autoMemory = true,
                         taskId = r.taskId.takeUnless { it == "null" }.orEmpty(),
                         chatTaskId = r.chatTaskId.takeUnless { it == "null" }.orEmpty(),
                         remote = true,
+                        channels = r.channels,
                     )
                 } else {
                     bots.map {
@@ -413,12 +414,21 @@ class Store(context: Context) {
                             chatTaskId = r.chatTaskId.takeIf { id -> id.isNotEmpty() && id != "null" }
                                 ?: it.chatTaskId,
                             remote = true,
+                            channels = r.channels,
+                            // 服务端返回四项齐全；旧服务端没有该字段时保留本地值。
+                            permissions = it.permissions + r.permissions,
                         ) else it
                     }
                 }
             }
             acc.copy(bots = bots)
         }
+    }
+
+    /** 重新拉取远端 Bot 列表；通道变更后用它刷新首页标记。 */
+    suspend fun refreshRemoteBots() {
+        val remote = api.listBots()
+        if (remote.isNotEmpty()) mergeRemoteBots(remote)
     }
 
     fun setTaskId(botId: String, taskId: String) = updateBot(botId) { it.copy(taskId = taskId) }
@@ -497,8 +507,26 @@ class Store(context: Context) {
 
     fun setWorking(botId: String, working: Boolean) = updateBot(botId) { it.copy(working = working) }
 
-    fun togglePermission(botId: String, key: String) = updateBot(botId) {
-        it.copy(permissions = it.permissions + (key to !(it.permissions[key] ?: false)))
+    /**
+     * 切换一项权限。远端 Bot 会立刻 PATCH 到服务端并回读；失败时回滚本地状态，
+     * 避免界面显示「已关闭」而服务端仍是开启。纯本地 Bot（群聊）只改本地。
+     */
+    suspend fun togglePermission(botId: String, key: String) {
+        val bot = bot(botId) ?: return
+        val previous = bot.permissions
+        // 服务端默认权限全开；没有显式记录的权限按开启处理，切换后即为关闭。
+        val next = previous + (key to !(previous[key] ?: true))
+        updateBot(botId) { it.copy(permissions = next) }
+        if (!bot.remote) return
+        try {
+            val remote = api.updateBotPermissions(botId, next)
+            updateBot(botId) { it.copy(permissions = remote.permissions.ifEmpty { next }) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            updateBot(botId) { it.copy(permissions = previous) }
+            Log.w("FluxBot/Store", "同步 Bot 权限失败：${e.message}")
+        }
     }
 
     fun setAutoMemory(botId: String, on: Boolean) = updateBot(botId) { it.copy(autoMemory = on) }

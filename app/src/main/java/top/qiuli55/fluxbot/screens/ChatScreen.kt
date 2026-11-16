@@ -35,6 +35,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -45,12 +48,14 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -60,6 +65,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -67,18 +73,29 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import top.qiuli55.fluxbot.data.ApprovalEvent
 import top.qiuli55.fluxbot.data.Bot
 import org.json.JSONObject
 import top.qiuli55.fluxbot.data.ComponentAction
 import top.qiuli55.fluxbot.data.Message
 import top.qiuli55.fluxbot.data.PendingDecision
+import top.qiuli55.fluxbot.data.RemoteMessage
+import top.qiuli55.fluxbot.data.approvalEventDecisions
+import top.qiuli55.fluxbot.data.approvalPositionLabel
+import top.qiuli55.fluxbot.data.firstShownApprovalLog
 import top.qiuli55.fluxbot.data.listRoutineDetails
+import top.qiuli55.fluxbot.data.mergePendingDecisions
 import top.qiuli55.fluxbot.data.routineTriggerSummary
+import top.qiuli55.fluxbot.data.stablePendingPage
 import top.qiuli55.fluxbot.data.updateRoutineDetail
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
@@ -95,6 +112,15 @@ import java.util.UUID
 private val CHIPS = listOf("总结未读消息", "安排今天", "查一下资料", "写一条周报")
 private val DockBg = Color(0xFF0D1013)
 
+/**
+ * 审批卡横滑翻页阈值：手指位移超过页宽的 25% 就翻页。
+ *
+ * HorizontalPager 默认阈值是 0.5，约 300ms / 600px 的快速轻扫翻不过去；
+ * 这里只调低阈值，翻页方向和一次最多一页的行为保持不变。
+ */
+internal const val approvalPagerSnapThreshold = 0.25f
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(botId: String) {
     val store = LocalStore.current
@@ -119,36 +145,215 @@ fun ChatScreen(botId: String) {
     var input by remember { mutableStateOf("") }
     var typing by remember { mutableStateOf(false) }
     var workingBots by remember { mutableStateOf<List<Bot>>(emptyList()) }
-    var pendingDecision by remember(botId) { mutableStateOf<PendingDecision?>(null) }
+    // 待决策可以同时有多张（主任务 + 子任务，或一条任务上先后挂出的多张卡）：
+    // 用列表 + 横滑轮播展示，每张卡有自己的提交状态。
+    var pendingDecisions by remember(botId) { mutableStateOf<List<PendingDecision>>(emptyList()) }
+    var cardStatuses by remember(botId) {
+        mutableStateOf<Map<String, ApprovalCardStatus>>(emptyMap())
+    }
+    var approvalAnchorId by remember(botId) { mutableStateOf<String?>(null) }
     var approving by remember(botId) { mutableStateOf(false) }
     var awaitingApproval by remember(botId) { mutableStateOf(false) }
     var activeTurnId by remember(botId) { mutableStateOf("") }
     var turnInFlight by remember(botId) { mutableStateOf(false) }
+    var resumed by remember(botId) { mutableStateOf(true) }
+    // 只用于「卡片首次出现」日志：同一决策只记一次。
+    val shownDecisions = remember(botId) { mutableSetOf<String>() }
+    val pagerState = rememberPagerState(pageCount = { pendingDecisions.size })
     val listState = rememberLazyListState()
     val context = LocalContext.current
 
     LaunchedEffect(messages.size) { store.markRead(botId) }
 
-    // 远端 Bot：可见期间持续轮询待批准决策；离开页面后自动取消。
-    suspend fun pollPendingDecisions() {
+    // 前后台切换：暂停时停掉审批轮询与事件流，回到前台立刻恢复。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, botId) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> resumed = true
+                Lifecycle.Event.ON_PAUSE -> resumed = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    /**
+     * 子任务在聊天轮次结束后才收尾：把终态消息补进本地列表。
+     *
+     * 服务端已把 completion/failure 写成普通 text 回复（payload 仍带 subtask_id），
+     * 所以这里只追加这类消息，不影响用户自己刚发出的本地气泡。
+     */
+    suspend fun syncSubtaskResults() {
         val b = store.bot(botId) ?: return
         if (!b.remote || b.group || b.id.isBlank()) return
         try {
-            val list = store.api.listPendingDecisions(b.id, b.chatTaskId)
-            pendingDecision = list.firstOrNull()
-            if (list.isNotEmpty()) awaitingApproval = true
+            val remote = store.api.conversation(b.id)
+            val seen = b.messages.map(::subtaskResultKey).toMutableSet()
+            remote.filter(::isVisibleSubtaskResult).forEach { item ->
+                val key = subtaskResultKey(item)
+                if (!seen.add(key)) return@forEach
+                store.addMessage(
+                    botId = botId,
+                    role = "bot",
+                    text = item.displayText(),
+                    kind = item.kind,
+                    payload = item.payload,
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // 轮询失败保持安静，不打断正在进行的聊天。
+            // 结果轮询失败保持安静；下一轮再试。
         }
     }
 
+    fun cardStatus(decisionId: String): ApprovalCardStatus =
+        cardStatuses[decisionId] ?: ApprovalCardStatus.Pending
+
+    fun setCardStatus(decisionId: String, status: ApprovalCardStatus) {
+        cardStatuses = cardStatuses + (decisionId to status)
+    }
+
+    /**
+     * 把一次拿到的列表落到界面：按 decisionId 去重、按发起时间从旧到新，
+     * 并给首次出现的卡片记一条日志（decision / 来源 / 从发起到显示的延迟）。
+     *
+     * [mergeWithCurrent] = true 用于「新卡到达」的事件（不能因为这一帧没带别的卡
+     * 就把它们删掉）；轮询与 ready 快照是权威列表，用 false 整体替换。
+     */
+    fun applyPendingDecisions(
+        incoming: List<PendingDecision>,
+        source: String,
+        mergeWithCurrent: Boolean,
+    ) {
+        val merged = if (mergeWithCurrent) {
+            mergePendingDecisions(listOf(pendingDecisions, incoming))
+        } else {
+            mergePendingDecisions(listOf(incoming))
+        }
+        val now = System.currentTimeMillis()
+        merged.forEach { decision ->
+            if (shownDecisions.add(decision.decisionId)) {
+                store.api.logDebug(firstShownApprovalLog(decision, source, now))
+            }
+        }
+        pendingDecisions = merged
+        cardStatuses = cardStatuses.filterKeys { key -> merged.any { it.decisionId == key } }
+        awaitingApproval = merged.isNotEmpty()
+    }
+
+    /**
+     * 拉一次待批准决策；成功返回 true。失败只记日志（由调用方退避重试），
+     * 不打断正在进行的聊天。
+     */
+    suspend fun pollPendingDecisions(source: String = "poll"): Boolean {
+        val b = store.bot(botId) ?: return false
+        if (!b.remote || b.group || b.id.isBlank()) return false
+        return try {
+            val list = store.api.listPendingDecisions(b.id, b.chatTaskId)
+            applyPendingDecisions(list, source, mergeWithCurrent = false)
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            store.api.logDebug(
+                "approval.poll.failed source=$source error=${e.message.orEmpty()}",
+            )
+            false
+        }
+    }
+
+    // 列表变化时把当前页锚定在用户正在看的那张卡：新卡插到前面不跳页；
+    // 当前卡被解决后顺延到顶上来的下一张。
+    LaunchedEffect(pendingDecisions) {
+        if (pendingDecisions.isEmpty()) {
+            approvalAnchorId = null
+            return@LaunchedEffect
+        }
+        val target = stablePendingPage(
+            pendingDecisions,
+            approvalAnchorId,
+            pagerState.currentPage,
+        )
+        if (target != pagerState.currentPage) pagerState.scrollToPage(target)
+        approvalAnchorId = pendingDecisions.getOrNull(target)?.decisionId
+    }
+
+    // 用户手动滑动后更新锚点，下一次列表更新不会把页面拉回旧卡。
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.currentPage }.collect { page ->
+            pendingDecisions.getOrNull(page)?.let { approvalAnchorId = it.decisionId }
+        }
+    }
+
+    // 审批兜底轮询（事件流之外的第二条腿）：可见且期间有活动时 3 秒一次，
+    // 空闲时降到 8 秒；连续失败按 6/12/24/30 秒退避，暂停 / 离开页面即停。
+    LaunchedEffect(botId, bot.remote, resumed) {
+        if (!bot.remote || bot.group || !resumed) return@LaunchedEffect
+        var failures = 0
+        while (true) {
+            val ok = pollPendingDecisions()
+            failures = if (ok) 0 else (failures + 1).coerceAtMost(4)
+            val active = pendingDecisions.isNotEmpty() || awaitingApproval || typing ||
+                turnInFlight || activeTurnId.isNotBlank()
+            val waitMs = when {
+                !ok -> minOf(3_000L shl failures, 30_000L)
+                active -> 3_000L
+                else -> 8_000L
+            }
+            delay(waitMs)
+        }
+    }
+
+    /** 处理一帧审批事件；状态改动统一切回主线程。 */
+    suspend fun handleApprovalEvent(event: ApprovalEvent) {
+        when (event.type) {
+            "ready" -> applyPendingDecisions(
+                approvalEventDecisions(event),
+                "sse.ready",
+                mergeWithCurrent = false,
+            )
+            "approval.raised" -> applyPendingDecisions(
+                approvalEventDecisions(event),
+                "sse.raised",
+                mergeWithCurrent = true,
+            )
+            "approval.resolved" -> pollPendingDecisions("sse.resolved")
+            else -> Unit
+        }
+    }
+
+    // 实时通道：后端有审批事件就推，卡片不用等下一次轮询；断线（含部署重启）
+    // 后退避重连，轮询继续兜底，两者互为备份。
+    LaunchedEffect(botId, bot.remote, resumed) {
+        if (!bot.remote || bot.group || !resumed) return@LaunchedEffect
+        var failures = 0
+        while (true) {
+            try {
+                store.api.streamApprovalEvents(bot.id) { event ->
+                    withContext(Dispatchers.Main) { handleApprovalEvent(event) }
+                    if (event.type == "ready") failures = 0
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                store.api.logDebug(
+                    "approval.sse.disconnected error=${e.message.orEmpty()}",
+                )
+            }
+            failures = (failures + 1).coerceAtMost(5)
+            delay(minOf(2_000L shl failures, 30_000L))
+        }
+    }
+
+    // 后台子任务收尾晚于本轮聊天：单独轮询对话，把终态当成普通 Bot 回复补进来。
     LaunchedEffect(botId, bot.remote) {
         if (!bot.remote || bot.group) return@LaunchedEffect
         while (true) {
-            pollPendingDecisions()
-            delay(2000)
+            syncSubtaskResults()
+            delay(5000)
         }
     }
 
@@ -203,7 +408,7 @@ fun ChatScreen(botId: String) {
                 if (status == "waiting_for_user_decision" || status == "waiting_for_approval") {
                     typing = false
                     awaitingApproval = true
-                    ui.scope.launch { pollPendingDecisions() }
+                    ui.scope.launch { pollPendingDecisions("turn.waiting") }
                 }
             }
             activeTurnId = ""
@@ -223,8 +428,7 @@ fun ChatScreen(botId: String) {
                 emptyList()
             }
             if (stillPending.isNotEmpty()) {
-                pendingDecision = stillPending.first()
-                awaitingApproval = true
+                applyPendingDecisions(stillPending, "turn.timeout", mergeWithCurrent = false)
                 typing = false
                 return
             }
@@ -239,27 +443,37 @@ fun ChatScreen(botId: String) {
         }
     }
 
-    fun respondDecision(option: String) {
-        val pending = pendingDecision ?: return
+    fun respondDecision(decision: PendingDecision, option: String) {
         if (approving) return
+        val current = cardStatus(decision.decisionId)
+        if (current is ApprovalCardStatus.Answered || current is ApprovalCardStatus.TimedOut) {
+            return
+        }
         approving = true
+        setCardStatus(decision.decisionId, ApprovalCardStatus.Submitting)
         val turnId = activeTurnId
         ui.scope.launch {
             try {
-                store.api.chooseDecision(pending.taskId, pending.decisionId, option)
-                pendingDecision = null
-                awaitingApproval = false
+                store.api.chooseDecision(decision.taskId, decision.decisionId, option)
+                // 已解决：这张卡立刻收走，轮播顺延到下一张仍待批准的卡。
+                pendingDecisions = pendingDecisions.filterNot {
+                    it.decisionId == decision.decisionId
+                }
+                cardStatuses = cardStatuses - decision.decisionId
+                awaitingApproval = pendingDecisions.isNotEmpty()
                 ui.haptic(8)
                 ui.showToast(if (option == "拒绝") "已拒绝" else "已允许")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                // 网络失败不能吞掉卡片：保持这张卡，卡片内提示并允许重试。
+                setCardStatus(decision.decisionId, ApprovalCardStatus.Failed("提交失败，请重试"))
                 ui.showToast(e.message ?: "操作失败")
                 return@launch
             } finally {
                 approving = false
             }
-            pollPendingDecisions()
+            pollPendingDecisions("decision.answered")
             if (turnId.isNotBlank() && activeTurnId == turnId && !turnInFlight) waitTurn(turnId)
         }
     }
@@ -277,7 +491,14 @@ fun ChatScreen(botId: String) {
             }
             action.type == "server" && action.decisionId.isNotBlank() -> {
                 val option = action.option.ifBlank { "允许" }
-                respondDecision(option)
+                val target = pendingDecisions.firstOrNull {
+                    it.decisionId == action.decisionId
+                } ?: pendingDecisions.firstOrNull()
+                if (target == null) {
+                    ui.showToast("这张卡已处理")
+                } else {
+                    respondDecision(target, option)
+                }
             }
             action.type == "server" -> {
                 ui.showToast("已提交：${action.name}")
@@ -315,7 +536,8 @@ fun ChatScreen(botId: String) {
 
     val itemCount = 1 + messages.size +
         (if (typing) 1 else 0) +
-        (if (workingBots.isNotEmpty()) 1 else 0)
+        (if (workingBots.isNotEmpty()) 1 else 0) +
+        (if (pendingDecisions.isNotEmpty()) 1 else 0)
     LaunchedEffect(itemCount) {
         if (itemCount > 0) listState.scrollToItem(itemCount - 1)
     }
@@ -482,13 +704,12 @@ fun ChatScreen(botId: String) {
                     )
                 }
             }
-            items(messages, key = { it.id }) { msg ->
+            items(visibleMessages(messages), key = { it.id }) { msg ->
                 MessageRow(
                     msg = msg,
                     senderBot = groupMembers.firstOrNull { it.name == msg.sender },
                     onLongPress = { ui.sheet = Sheet.MessageMenu(botId, msg.id, msg.displayText()) },
                     onComponentAction = ::handleComponentAction,
-                    onOpenSubtask = { ui.push(Route.BotDetail(botId, tab = 2)) },
                     onOpenRoutine = { routineId ->
                         ui.sheet = Sheet.RoutineDetail(botId, routineId)
                     },
@@ -501,18 +722,46 @@ fun ChatScreen(botId: String) {
             if (workingBots.isNotEmpty()) {
                 item(key = "working") { GroupWorkingRow(workingBots) }
             }
+            // 审批卡跟在对话流末尾，按 Bot 气泡的左对齐与最大宽度展示，不再贴着输入栏。
+            // 多张待决策时只占同一个位置：左右滑动切换，卡片上标 1/N。
+            if (pendingDecisions.isNotEmpty()) {
+                item(key = "approval-pager") {
+                    BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        val cardMaxWidth = maxWidth * 0.79f
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Start,
+                        ) {
+                            HorizontalPager(
+                                state = pagerState,
+                                modifier = Modifier.widthIn(max = cardMaxWidth),
+                                flingBehavior = PagerDefaults.flingBehavior(
+                                    state = pagerState,
+                                    snapPositionalThreshold = approvalPagerSnapThreshold,
+                                ),
+                            ) { page ->
+                                val decision = pendingDecisions.getOrNull(page)
+                                if (decision != null) {
+                                    ApprovalCard(
+                                        decision = decision,
+                                        status = cardStatus(decision.decisionId),
+                                        positionLabel = approvalPositionLabel(
+                                            page,
+                                            pendingDecisions.size,
+                                        ),
+                                        onChoose = { respondDecision(decision, it) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Column(Modifier.fillMaxWidth()) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
-            pendingDecision?.let { pending ->
-                ApprovalCard(
-                    decision = pending,
-                    busy = approving,
-                    waiting = awaitingApproval,
-                    onChoose = { respondDecision(it) },
-                )
-            }
             ChatChips { submit(it) }
             ChatComposer(
                 hint = if (bot.group) "在群里发消息" else "发消息给 ${bot.name}",
@@ -670,6 +919,39 @@ private fun ChatHead(
     }
 }
 
+/**
+ * 子任务消息只在后台运行，不再进入对话列表。
+ *
+ * 数据与接口仍然保留，这里只负责决定哪些 kind 不渲染；
+ * 纯函数便于 JVM 测试直接覆盖。
+ */
+internal fun isHiddenMessageKind(kind: String): Boolean = kind == "subtask"
+
+/** 对话列表真正渲染的消息：过滤掉后台子任务。 */
+internal fun visibleMessages(messages: List<Message>): List<Message> =
+    messages.filterNot { isHiddenMessageKind(it.kind) }
+
+/** 子任务终态：服务端写成普通 text 回复，聊天里要直接展示。 */
+private val TERMINAL_SUBTASK_STATUSES = setOf("completed", "failed", "cancelled")
+
+/**
+ * 是否是应在聊天里补显示的子任务终态回复。
+ *
+ * 开始/进度仍是 kind=subtask（隐藏）；只有终态的普通 text 回复带 subtask_id。
+ */
+internal fun isVisibleSubtaskResult(message: RemoteMessage): Boolean =
+    message.kind == "text" &&
+        message.payload["subtask_id"].orEmpty().isNotBlank() &&
+        message.payload["status"].orEmpty() in TERMINAL_SUBTASK_STATUSES
+
+private fun subtaskResultKey(message: RemoteMessage): String =
+    "${message.payload["subtask_id"].orEmpty()}|" +
+        "${message.payload["status"].orEmpty()}|${message.displayText()}"
+
+private fun subtaskResultKey(message: Message): String =
+    "${message.payload["subtask_id"].orEmpty()}|" +
+        "${message.payload["status"].orEmpty()}|${message.displayText()}"
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun MessageRow(
@@ -679,12 +961,13 @@ internal fun MessageRow(
     /** 生产路径传入真实触感；截图脚手架保持空回调。 */
     onLikeHaptic: () -> Unit = {},
     onComponentAction: (ComponentAction) -> Unit = {},
-    onOpenSubtask: (() -> Unit)? = null,
     onOpenRoutine: ((String) -> Unit)? = null,
     onPauseRoutine: ((String) -> Unit)? = null,
 ) {
-    if (msg.kind == "subtask" || msg.kind == "routine_created" || msg.kind == "decision_result") {
-        InlineEventCard(msg, onOpenSubtask, onOpenRoutine, onPauseRoutine)
+    // 子任务已经不再出现在界面上：数据与接口保留，只是不渲染。
+    if (isHiddenMessageKind(msg.kind)) return
+    if (msg.kind == "routine_created" || msg.kind == "decision_result") {
+        InlineEventCard(msg, onOpenRoutine, onPauseRoutine)
         return
     }
     val user = msg.role == "user"
@@ -785,11 +1068,10 @@ internal fun MessageRow(
     }
 }
 
-/** 对话里的系统事件卡：后台子任务 / Bot 创建的例程 / 已处理审批。 */
+/** 对话里的系统事件卡：Bot 创建的例程 / 已处理审批。 */
 @Composable
 internal fun InlineEventCard(
     msg: Message,
-    onOpenSubtask: (() -> Unit)?,
     onOpenRoutine: ((String) -> Unit)?,
     onPauseRoutine: ((String) -> Unit)?,
 ) {
@@ -803,61 +1085,6 @@ internal fun InlineEventCard(
             .padding(horizontal = 14.dp, vertical = 12.dp),
     ) {
         when (msg.kind) {
-            "subtask" -> {
-                val status = msg.payload["status"].orEmpty()
-                val running = status in setOf(
-                    "running", "executing", "queued", "pending", "waiting_for_user_decision",
-                )
-                val title = msg.payload["title"].orEmpty().ifBlank { msg.displayText() }
-                val summary = msg.payload["summary"].orEmpty()
-                    .ifBlank { msg.payload["result"].orEmpty() }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier.size(7.dp).clip(CircleShape)
-                            .background(if (running) Flux.warn else Flux.text4),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        title.ifBlank { "后台子任务" },
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight(560),
-                        color = Flux.text,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Pill(
-                        when {
-                            running -> "运行中"
-                            status == "completed" -> "已完成"
-                            status == "cancelled" -> "已取消"
-                            status == "failed" -> "失败"
-                            else -> "已结束"
-                        },
-                        if (running) Flux.warn else if (status == "failed") Flux.danger else Flux.text3,
-                        if (running) Color(0x1FE8B25E) else Flux.panel3,
-                    )
-                }
-                Spacer(Modifier.height(5.dp))
-                Text(
-                    if (running) "运行中 · 不占用对话" else summary.ifBlank { "结果已回到对话" },
-                    fontSize = 11.5.sp,
-                    color = Flux.text3,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (onOpenSubtask != null) {
-                    Text(
-                        "查看子任务",
-                        fontSize = 11.5.sp,
-                        color = Flux.accent,
-                        modifier = Modifier
-                            .padding(top = 8.dp)
-                            .clickable { onOpenSubtask() },
-                    )
-                }
-            }
             "routine_created" -> {
                 val routineId = msg.payload["routine_id"].orEmpty()
                     .ifBlank { msg.payload["id"].orEmpty() }
@@ -1036,281 +1263,6 @@ private fun TypingRow(animated: Boolean = true) {
     }
 }
 
-/** 审批卡：工具 / 出站草稿 / 通用决策，只存在于界面上，不写入消息列表。 */
-@Composable
-internal fun ApprovalCard(
-    decision: PendingDecision,
-    busy: Boolean,
-    waiting: Boolean,
-    onChoose: (String) -> Unit,
-) {
-    val channel = decision.meta["channel"].orEmpty()
-    val tool = decision.meta["tool_name"].orEmpty()
-    when {
-        channel.isNotBlank() || decision.kind.endsWith("_outbound") ->
-            OutboundApprovalCard(decision, busy, waiting, onChoose)
-        tool.isNotBlank() || decision.kind in setOf(
-            "high_risk_command", "protected_access", "rule_match", "tool_permission_prompt",
-        ) -> ToolApprovalCard(decision, busy, waiting, onChoose)
-        else -> GenericApprovalCard(decision, busy, waiting, onChoose)
-    }
-}
-
-@Composable
-private fun ApprovalShell(
-    title: String,
-    badgeColor: Color,
-    note: String,
-    busy: Boolean,
-    waiting: Boolean,
-    options: List<String>,
-    onChoose: (String) -> Unit,
-    body: @Composable () -> Unit,
-) {
-    val shape = RoundedCornerShape(18.dp)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(start = 12.dp, end = 12.dp, top = 10.dp)
-            .clip(shape)
-            .background(Flux.panel2)
-            .border(1.dp, Flux.line, shape)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            Box(Modifier.size(7.dp).clip(CircleShape).background(badgeColor))
-            Text(
-                title,
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight(560),
-                color = Flux.text,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        body()
-        Text(
-            if (waiting) "等待你的批准 · $note" else note,
-            fontSize = 10.5.sp,
-            color = Flux.text4,
-            modifier = Modifier.padding(top = 8.dp),
-        )
-        val labels = options.ifEmpty { listOf("允许", "拒绝") }
-        Row(
-            Modifier.fillMaxWidth().padding(top = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            labels.forEach { label ->
-                val primary = label != "拒绝" && (label == "允许" || labels.size == 1)
-                ApprovalButton(
-                    label = label,
-                    primary = primary,
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                    onClick = { onChoose(label) },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ToolApprovalCard(
-    decision: PendingDecision,
-    busy: Boolean,
-    waiting: Boolean,
-    onChoose: (String) -> Unit,
-) {
-    val tool = decision.meta["tool_name"].orEmpty()
-    val command = decision.detail.lineSequence()
-        .firstOrNull { it.startsWith("命令：") }
-        ?.removePrefix("命令：")
-        ?.trim()
-        .orEmpty()
-    val risk = decision.detail.lineSequence()
-        .firstOrNull { it.startsWith("风险：") }
-        ?.removePrefix("风险：")
-        ?.trim()
-        .orEmpty()
-    val dir = decision.meta["working_dir"].orEmpty()
-    ApprovalShell(
-        title = decision.question.ifBlank {
-            if (tool.isBlank()) "需要你批准" else "Claude 请求使用 $tool"
-        },
-        badgeColor = Flux.warn,
-        note = "仅本次有效 · 10 分钟无响应自动拒绝",
-        busy = busy,
-        waiting = waiting,
-        options = decision.options,
-        onChoose = onChoose,
-    ) {
-        if (command.isNotBlank()) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 9.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF090B0D))
-                    .border(1.dp, Flux.lineSoft, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 11.dp, vertical = 9.dp),
-            ) {
-                Text(
-                    command,
-                    fontSize = 11.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = Color(0xFFCFE9DE),
-                    lineHeight = 17.sp,
-                    maxLines = 5,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (dir.isNotBlank()) {
-                    Text(
-                        dir,
-                        fontSize = 10.5.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = Flux.text4,
-                        modifier = Modifier.padding(top = 5.dp),
-                    )
-                }
-            }
-        } else if (decision.detail.isNotBlank()) {
-            Text(
-                decision.detail,
-                fontSize = 12.sp,
-                color = Flux.text3,
-                lineHeight = 18.sp,
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-        if (risk.isNotBlank()) {
-            Text(
-                "风险：$risk",
-                fontSize = 10.5.sp,
-                color = Flux.warn,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun OutboundApprovalCard(
-    decision: PendingDecision,
-    busy: Boolean,
-    waiting: Boolean,
-    onChoose: (String) -> Unit,
-) {
-    val channel = decision.meta["channel"].orEmpty()
-    val channelText = when (channel) {
-        "feishu" -> "飞书"
-        "wecom" -> "企业微信"
-        "dingtalk" -> "钉钉"
-        "email" -> "邮箱"
-        else -> channel.ifBlank { "频道" }
-    }
-    val chat = decision.meta["chat_id"].orEmpty()
-    val preview = decision.detail.lineSequence()
-        .filterNot { it.startsWith("准备发送到") || it.startsWith("触发规则：") }
-        .joinToString("\n")
-        .trim()
-    ApprovalShell(
-        title = listOfNotNull(
-            "发送到$channelText",
-            chat.takeIf { it.isNotBlank() },
-        ).joinToString(" · "),
-        badgeColor = Flux.accent,
-        note = "出站草稿 · 允许后只发送一次",
-        busy = busy,
-        waiting = waiting,
-        options = decision.options,
-        onChoose = onChoose,
-    ) {
-        if (preview.isNotBlank()) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 9.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Flux.panel3)
-                    .padding(horizontal = 11.dp, vertical = 9.dp),
-            ) {
-                Text(
-                    preview,
-                    fontSize = 12.sp,
-                    color = Flux.text2,
-                    lineHeight = 18.sp,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun GenericApprovalCard(
-    decision: PendingDecision,
-    busy: Boolean,
-    waiting: Boolean,
-    onChoose: (String) -> Unit,
-) {
-    ApprovalShell(
-        title = decision.question.ifBlank { "需要你批准" },
-        badgeColor = Flux.warn,
-        note = "仅本次有效",
-        busy = busy,
-        waiting = waiting,
-        options = decision.options,
-        onChoose = onChoose,
-    ) {
-        if (decision.detail.isNotBlank()) {
-            Text(
-                decision.detail,
-                fontSize = 12.sp,
-                color = Flux.text3,
-                lineHeight = 18.sp,
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun ApprovalButton(
-    label: String,
-    primary: Boolean,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    val shape = RoundedCornerShape(14.dp)
-    Box(
-        modifier
-            .height(38.dp)
-            .clip(shape)
-            .background(if (primary) Flux.accent else Flux.panel3)
-            .border(1.dp, if (primary) Flux.accent else Flux.line, shape)
-            .alpha(if (enabled) 1f else 0.4f)
-            .clickable(enabled = enabled) { onClick() },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            label,
-            fontSize = 13.sp,
-            fontWeight = FontWeight(560),
-            color = if (primary) Flux.ink else Flux.text,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
 
 /**
  * 仅用于 JVM 截图（Paparazzi）的聊天页快照。
@@ -1318,13 +1270,19 @@ private fun ApprovalButton(
  * 复用真实 ChatHead / MessageRow / TypingRow / GroupWorkingRow / ApprovalCard /
  * 快捷 chips / 输入栏，但不读取 LocalStore、不轮询远端决策、不发网络请求。
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun ChatSnapshot(
     bot: Bot,
     messages: List<Message>,
     pending: PendingDecision? = null,
-    approving: Boolean = false,
-    waiting: Boolean = false,
+    pendingStatus: ApprovalCardStatus = ApprovalCardStatus.Pending,
+    /** 多卡轮播截图：除 [pending] 之外的其余待决策。 */
+    additionalPending: List<PendingDecision> = emptyList(),
+    /** 多卡轮播截图：初始停在第几页（0 起）。 */
+    initialApprovalPage: Int = 0,
+    /** 截图用：命令区是否展开。 */
+    approvalExpanded: Boolean = false,
     typing: Boolean = false,
     workingBots: List<Bot> = emptyList(),
     groupMembers: List<Bot> = emptyList(),
@@ -1333,6 +1291,13 @@ internal fun ChatSnapshot(
     onAction: (String) -> Unit = {},
     onComponentAction: (ComponentAction) -> Unit = {},
 ) {
+    val snapshotDecisions = remember(pending, additionalPending) {
+        mergePendingDecisions(listOf(listOfNotNull(pending) + additionalPending))
+    }
+    val snapshotPager = rememberPagerState(
+        initialPage = initialApprovalPage.coerceAtLeast(0),
+        pageCount = { snapshotDecisions.size },
+    )
     FluxTheme {
         val inheritedStyle = LocalTextStyle.current
         CompositionLocalProvider(
@@ -1377,7 +1342,7 @@ internal fun ChatSnapshot(
                             )
                         }
                     }
-                    items(messages, key = { it.id }) { msg ->
+                    items(visibleMessages(messages), key = { it.id }) { msg ->
                         MessageRow(
                             msg = msg,
                             senderBot = groupMembers.firstOrNull { it.name == msg.sender },
@@ -1391,18 +1356,45 @@ internal fun ChatSnapshot(
                     if (workingBots.isNotEmpty()) {
                         item(key = "working") { GroupWorkingRow(workingBots) }
                     }
+                    if (snapshotDecisions.isNotEmpty()) {
+                        item(key = "approval-pager") {
+                            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                                val cardMaxWidth = maxWidth * 0.79f
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Start,
+                                ) {
+                                    HorizontalPager(
+                                        state = snapshotPager,
+                                        modifier = Modifier.widthIn(max = cardMaxWidth),
+                                    ) { page ->
+                                        val decision = snapshotDecisions.getOrNull(page)
+                                        if (decision != null) {
+                                            ApprovalCard(
+                                                decision = decision,
+                                                status = if (page == 0) {
+                                                    pendingStatus
+                                                } else {
+                                                    ApprovalCardStatus.Pending
+                                                },
+                                                positionLabel = approvalPositionLabel(
+                                                    page,
+                                                    snapshotDecisions.size,
+                                                ),
+                                                initiallyExpanded = approvalExpanded,
+                                                onChoose = onAction,
+                                                modifier = Modifier.fillMaxWidth(),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Column(Modifier.fillMaxWidth()) {
                     Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
-                    pending?.let {
-                        ApprovalCard(
-                            decision = it,
-                            busy = approving,
-                            waiting = waiting,
-                            onChoose = onAction,
-                        )
-                    }
                     ChatChips(onPick = onAction)
                     ChatComposer(
                         hint = if (bot.group) "在群里发消息" else "发消息给 ${bot.name}",

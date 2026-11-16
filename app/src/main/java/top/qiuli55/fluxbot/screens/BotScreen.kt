@@ -51,12 +51,18 @@ import top.qiuli55.fluxbot.ui.Pill
 import top.qiuli55.fluxbot.ui.SegTabs
 import top.qiuli55.fluxbot.ui.TabHint
 
-private val TABS = listOf("记忆", "例程", "子任务", "设置")
+/** Bot 详情的三个分区顺序，测试直接校验这份列表。 */
+internal val BOT_TABS = listOf("记忆", "例程", "设置")
 
 private fun permissionText(perms: Map<String, Boolean>): String {
     val names = listOf("files" to "文件", "shell" to "命令", "network" to "网络", "apps" to "应用")
-    val on = names.filter { perms[it.first] == true }.map { it.second }
-    return if (on.isEmpty()) "全部关闭" else on.joinToString(" · ")
+    // 服务端默认权限全开：缺失的键按开启处理，避免把「未记录」误显示成「全部关闭」。
+    val on = names.filter { perms[it.first] != false }.map { it.second }
+    return when {
+        on.isEmpty() -> "全部关闭"
+        on.size == names.size -> "权限全开"
+        else -> on.joinToString(" · ")
+    }
 }
 
 @Composable
@@ -64,7 +70,7 @@ fun BotScreen(botId: String, initialTab: Int = 0) {
     val store = LocalStore.current
     val ui = LocalUi.current
     val bot = store.bot(botId)
-    var tab by remember(botId) { mutableIntStateOf(initialTab.coerceIn(0, TABS.lastIndex)) }
+    var tab by remember(botId) { mutableIntStateOf(initialTab.coerceIn(0, BOT_TABS.lastIndex)) }
 
     Column(Modifier.fillMaxSize().background(Flux.bg)) {
         if (bot == null) {
@@ -76,37 +82,15 @@ fun BotScreen(botId: String, initialTab: Int = 0) {
             return@Column
         }
 
-        Row(
-            Modifier.fillMaxWidth().height(58.dp).padding(start = 6.dp, end = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconBtn(FIcon.Back) { ui.back() }
-            Spacer(Modifier.width(2.dp))
-            BotAvatar(bot, 34.dp, animated = true)
-            Spacer(Modifier.width(11.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    bot.name,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight(560),
-                    color = Flux.text,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    bot.computer.ifBlank { "A 机" },
-                    fontSize = 11.sp,
-                    color = Flux.text3,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            IconBtn(FIcon.Monitor) { ui.push(Route.BotDesktop(bot.id)) }
-            IconBtn(FIcon.More) { ui.sheet = Sheet.BotMenu(bot.id) }
-        }
+        BotDetailHeader(
+            bot = bot,
+            onBack = { ui.back() },
+            onDesktop = { ui.push(Route.BotDesktop(bot.id)) },
+            onOpenMenu = { ui.sheet = Sheet.BotMenu(bot.id) },
+        )
 
         SegTabs(
-            TABS, tab, { tab = it },
+            BOT_TABS, tab, { tab = it },
             Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
         )
 
@@ -119,10 +103,60 @@ fun BotScreen(botId: String, initialTab: Int = 0) {
             when (tab) {
                 0 -> MemoryPane(bot)
                 1 -> RoutinePane(bot)
-                2 -> SubtaskPane(bot)
                 else -> SettingsPane(bot)
             }
         }
+    }
+}
+
+/**
+ * Bot 详情页顶部：返回、头像、名称、电脑与通道标记、桌面和更多入口。
+ *
+ * 单独抽出来，JVM 截图可以直接覆盖「有通道标记」的头部，
+ * 不需要构造 Store / 路由。
+ */
+@Composable
+internal fun BotDetailHeader(
+    bot: Bot,
+    onBack: () -> Unit = {},
+    onDesktop: () -> Unit = {},
+    onOpenMenu: () -> Unit = {},
+    avatarAnimated: Boolean = true,
+) {
+    Row(
+        Modifier.fillMaxWidth().height(58.dp).padding(start = 6.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconBtn(FIcon.Back) { onBack() }
+        Spacer(Modifier.width(2.dp))
+        BotAvatar(bot, 34.dp, animated = avatarAnimated)
+        Spacer(Modifier.width(11.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                bot.name,
+                fontSize = 15.sp,
+                fontWeight = FontWeight(560),
+                color = Flux.text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    bot.computer.ifBlank { "A 机" },
+                    fontSize = 11.sp,
+                    color = Flux.text3,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (bot.channels.isNotEmpty()) {
+                    Spacer(Modifier.width(8.dp))
+                    BotChannelMarkers(bot.channels)
+                }
+            }
+        }
+        IconBtn(FIcon.Monitor) { onDesktop() }
+        IconBtn(FIcon.More) { onOpenMenu() }
     }
 }
 

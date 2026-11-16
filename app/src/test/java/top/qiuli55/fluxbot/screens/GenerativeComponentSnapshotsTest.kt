@@ -468,31 +468,6 @@ class GenerativeComponentSnapshotsTest {
     )
 
     @Test
-    fun subtask() = chat(
-        "12-subtask",
-        listOf(
-            userMsg("st-u", "17:20", "录音整理好了吗？"),
-            componentMsg(
-                "st-c",
-                "17:21",
-                ComponentNode.Card(
-                    title = "后台子任务 · 整理会议纪要",
-                    children = listOf(
-                        text("正在转录 42 分钟的录音，完成后我会把要点贴回这里。"),
-                        ComponentNode.Progress(
-                            label = "转录与分段",
-                            percent = 62,
-                            status = "running",
-                        ),
-                    ),
-                ),
-                fallback = "正在整理会议纪要，已完成 62%。",
-                kind = "subtask",
-            ),
-        ),
-    )
-
-    @Test
     fun runFinished() = chat(
         "13-run-finished",
         listOf(

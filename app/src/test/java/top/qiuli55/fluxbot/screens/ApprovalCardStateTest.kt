@@ -182,4 +182,73 @@ class ApprovalCardStateTest {
             ),
         )
     }
+
+    // ---------- 操作行：detail 推导 ----------
+
+    @Test
+    fun operationStripsBotExecutionPrefixAndTrailingExplanation() {
+        assertEquals(
+            "rm -rf victim-f",
+            approvalOperation(decision(detail = "Bot 准备执行：rm -rf victim-f（会删除文件）")),
+        )
+        assertEquals(
+            "rm -rf victim-g",
+            approvalOperation(decision(detail = "Bot 准备执行: rm -rf victim-g (会删除文件)")),
+        )
+    }
+
+    @Test
+    fun operationStripsPlainExecutionPrefix() {
+        assertEquals(
+            "ls -la",
+            approvalOperation(decision(detail = "准备执行：ls -la（查看目录）")),
+        )
+    }
+
+    @Test
+    fun operationWithoutPrefixOnlyDropsExplanation() {
+        assertEquals(
+            "rm -rf victim-h",
+            approvalOperation(decision(detail = "rm -rf victim-h（删除目录）")),
+        )
+    }
+
+    @Test
+    fun operationKeepsNestedParenthesesOutsideTrailingExplanation() {
+        assertEquals(
+            "rm -rf victim-i",
+            approvalOperation(decision(detail = "Bot 准备执行：rm -rf victim-i（删除（危险）目录）")),
+        )
+    }
+
+    @Test
+    fun operationLeavesTextWithoutTrailingExplanationUntouched() {
+        assertEquals(
+            "systemctl restart flux",
+            approvalOperation(decision(detail = "准备执行：systemctl restart flux")),
+        )
+    }
+
+    @Test
+    fun operationDoesNotBlindlyStripCommandParentheses() {
+        assertEquals(
+            "echo (x)",
+            approvalOperation(decision(detail = "准备执行：echo (x)")),
+        )
+    }
+
+    @Test
+    fun operationHandlesEmptyAndExplanationOnlyDetail() {
+        assertEquals("", approvalOperation(decision(detail = "")))
+        assertEquals("（只删空目录）", approvalOperation(decision(detail = "（只删空目录）")))
+    }
+
+    @Test
+    fun darkAndLightPalettesBothExistAndDiffer() {
+        val dark = approvalCardColors(darkTheme = true)
+        val light = approvalCardColors(darkTheme = false)
+        assertEquals(darkApprovalCardColors, dark)
+        assertEquals(lightApprovalCardColors(), light)
+        assertTrue(dark.background != light.background)
+    }
 }

@@ -14,18 +14,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import top.qiuli55.fluxbot.data.PendingDecision
+import top.qiuli55.fluxbot.ui.Flux
 
 /**
  * 审批卡的界面状态。
@@ -78,9 +81,62 @@ internal fun approvalTitle(kind: String, meta: Map<String, String>): String = wh
     }
 }
 
+/** detail 里可能出现的执行前缀；后端 `describe_deletion` 用的是全角冒号。 */
+private val executionPrefixes = listOf(
+    "Bot 准备执行：",
+    "Bot 准备执行:",
+    "准备执行：",
+    "准备执行:",
+)
+
 /**
- * 卡片正文里的具体操作：优先用后端下发的 command，其次取 detail 里的「命令：」，
- * 最后把 detail 中「触发规则 / 风险 / 准备发送到」这类说明行去掉，只留可读的操作本身。
+ * 去掉一行末尾的解释性括号，例如「rm -rf x（会删除文件）」→「rm -rf x」。
+ *
+ * 从右往左配对括号，嵌套括号只去掉最外层的一组；整段只有一个括号时保留原文，
+ * 避免把唯一的操作说明清空。半角括号仅在内容含中文时才视为解释，防止误伤
+ * `echo (x)` 这类命令语法。
+ */
+private fun stripTrailingExplanation(text: String): String {
+    if (text.isEmpty()) return text
+    val closing = text.last()
+    val opening = when (closing) {
+        '）' -> '（'
+        ')' -> '('
+        else -> return text
+    }
+    var depth = 0
+    for (index in text.indices.reversed()) {
+        when (text[index]) {
+            closing -> depth++
+            opening -> {
+                depth--
+                if (depth == 0) {
+                    if (index == 0) return text
+                    val content = text.substring(index + 1, text.length - 1)
+                    val explanatory = opening == '（' || content.any { it.code > 0x2E80 }
+                    if (!explanatory) return text
+                    return text.substring(0, index).trimEnd()
+                }
+            }
+        }
+    }
+    return text
+}
+
+/** 取 detail 里的操作文本：去执行前缀、去末尾解释括号。 */
+internal fun approvalCommandFromDetail(detail: String): String {
+    val trimmed = detail.trim()
+    val withoutPrefix = executionPrefixes
+        .firstOrNull { trimmed.startsWith(it) }
+        ?.let { trimmed.removePrefix(it) }
+        ?: trimmed
+    return stripTrailingExplanation(withoutPrefix.trim()).trim()
+}
+
+/**
+ * 卡片正文里的具体操作：优先用后端下发的 raw command；没有 command 时从 detail 推导，
+ * 去掉「Bot 准备执行：」这类前缀和末尾「（会删除文件）」这类解释，只留操作本身。
+ * 兼容旧 detail 的「命令：」行与「触发规则 / 风险 / 准备发送到」说明行。
  */
 internal fun approvalOperation(decision: PendingDecision): String {
     val command = decision.meta["command"].orEmpty().trim()
@@ -89,19 +145,20 @@ internal fun approvalOperation(decision: PendingDecision): String {
         .map { it.trim() }
         .filter { it.isNotEmpty() }
         .toList()
-    lines.firstOrNull { it.startsWith("命令：") }
+    lines.firstOrNull { it.startsWith("命令：") || it.startsWith("命令:") }
         ?.removePrefix("命令：")
+        ?.removePrefix("命令:")
         ?.trim()
         ?.takeIf { it.isNotEmpty() }
         ?.let { return it }
-    return lines
+    val operation = lines
         .filterNot {
             it.startsWith("触发规则：") ||
                 it.startsWith("风险：") ||
                 it.startsWith("准备发送到")
         }
         .joinToString("\n")
-        .trim()
+    return approvalCommandFromDetail(operation)
 }
 
 /** 秒数 -> 中文时长：300 -> 5 分钟，90 -> 1 分 30 秒，45 -> 45 秒。 */
@@ -148,27 +205,91 @@ internal fun approvalCardUi(
     )
 }
 
-private val CardBg = Color(0xFFF7F8F7)
-private val CardBgMuted = Color(0xFFF1F3F2)
-private val CardLine = Color(0xFFE2E6E4)
-private val CardLineMuted = Color(0xFFE9ECEA)
-private val TitleColor = Color(0xFF6D7773)
-private val TitleColorMuted = Color(0xFF9AA29F)
-private val OperationColor = Color(0xFF3C4642)
-private val OperationColorMuted = Color(0xFF8A928F)
-private val OptionColor = Color(0xFF1B2320)
-private val OptionColorMuted = Color(0xFF8B938F)
-private val BadgeBg = Color(0xFFEAEEEC)
-private val BadgeBgMuted = Color(0xFFE9ECEA)
-private val BadgeText = Color(0xFF4B5551)
-private val BadgeTextMuted = Color(0xFF9AA29F)
-private val FooterColor = Color(0xFF98A09D)
-private val ErrorColor = Color(0xFFB3261E)
+/**
+ * 审批卡配色。深色默认全部取自 [Flux] 令牌，与 App 现有暗色界面一致；
+ * 浅色变体是近白卡面，供以后真正上线浅色主题时直接切换，无需改卡片结构。
+ */
+internal data class ApprovalCardColors(
+    val background: Color,
+    val backgroundMuted: Color,
+    val border: Color,
+    val borderMuted: Color,
+    val divider: Color,
+    val dividerMuted: Color,
+    val title: Color,
+    val titleMuted: Color,
+    val command: Color,
+    val commandMuted: Color,
+    val option: Color,
+    val optionMuted: Color,
+    val badgeBackground: Color,
+    val badgeBackgroundMuted: Color,
+    val badgeText: Color,
+    val badgeTextMuted: Color,
+    val footer: Color,
+    val footerMuted: Color,
+    val check: Color,
+    val error: Color,
+)
+
+/** 暗色卡面：比聊天背景略亮一层的 panel2/panel3，细边框，文字收敛到 text/text2/text3。 */
+internal val darkApprovalCardColors = ApprovalCardColors(
+    background = Flux.panel2,
+    backgroundMuted = Flux.panel,
+    border = Flux.line,
+    borderMuted = Flux.lineSoft,
+    divider = Flux.line,
+    dividerMuted = Flux.lineSoft,
+    title = Flux.text2,
+    titleMuted = Flux.text4,
+    command = Flux.text,
+    commandMuted = Flux.text3,
+    option = Flux.text,
+    optionMuted = Flux.text4,
+    badgeBackground = Flux.panel3,
+    badgeBackgroundMuted = Flux.panel2,
+    badgeText = Flux.text2,
+    badgeTextMuted = Flux.text4,
+    footer = Flux.text3,
+    footerMuted = Flux.text4,
+    check = Flux.text2,
+    error = Flux.danger,
+)
+
+/** 浅色卡面：沿用上一轮近白卡片的观感，留给未来的浅色主题。 */
+internal fun lightApprovalCardColors() = ApprovalCardColors(
+    background = Color(0xFFFAFAF9),
+    backgroundMuted = Color(0xFFF1F3F2),
+    border = Color(0xFFE2E6E4),
+    borderMuted = Color(0xFFE9ECEA),
+    divider = Color(0xFFE2E6E4),
+    dividerMuted = Color(0xFFE9ECEA),
+    title = Color(0xFF6D7773),
+    titleMuted = Color(0xFF9AA29F),
+    command = Color(0xFF3C4642),
+    commandMuted = Color(0xFF8A928F),
+    option = Color(0xFF1B2320),
+    optionMuted = Color(0xFF8B938F),
+    badgeBackground = Color(0xFFEAEEEC),
+    badgeBackgroundMuted = Color(0xFFE9ECEA),
+    badgeText = Color(0xFF4B5551),
+    badgeTextMuted = Color(0xFF9AA29F),
+    footer = Color(0xFF98A09D),
+    footerMuted = Color(0xFF9AA29F),
+    check = Color(0xFF4B5551),
+    error = Color(0xFFB3261E),
+)
+
+/** 由当前主题背景亮度决定用哪套卡面：暗色 App 用 Flux 令牌，将来浅色主题自动跟随。 */
+internal fun approvalCardColors(darkTheme: Boolean): ApprovalCardColors =
+    if (darkTheme) darkApprovalCardColors else lightApprovalCardColors()
 
 /**
- * Grok Bot 风格问题卡：浅色圆角卡、灰色标题、单色操作行、字母徽标。
+ * Grok Bot 风格问题卡：圆角卡面、灰色标题、单色操作行、字母徽标。
  *
- * 只负责展示与点击回调，网络请求仍在 ChatScreen 的 respondDecision 里。
+ * 配色默认跟随当前主题背景亮度：暗色 App 用 Flux 令牌（panel2/panel3 + 细边框），
+ * 将来上线浅色主题时自动切到近白卡面。只负责展示与点击回调，网络请求仍在
+ * ChatScreen 的 respondDecision 里。
  */
 @Composable
 internal fun ApprovalCard(
@@ -176,22 +297,29 @@ internal fun ApprovalCard(
     onChoose: (String) -> Unit,
     modifier: Modifier = Modifier,
     status: ApprovalCardStatus = ApprovalCardStatus.Pending,
+    colors: ApprovalCardColors? = null,
 ) {
     val ui = approvalCardUi(decision, status)
+    val palette = colors
+        ?: approvalCardColors(MaterialTheme.colorScheme.background.luminance() < 0.5f)
     val shape = RoundedCornerShape(16.dp)
     Column(
         modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(if (ui.muted) CardBgMuted else CardBg)
-            .border(1.dp, if (ui.muted) CardLineMuted else CardLine, shape),
+            .background(if (ui.muted) palette.backgroundMuted else palette.background)
+            .border(
+                1.dp,
+                if (ui.muted) palette.borderMuted else palette.border,
+                shape,
+            ),
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
             Text(
                 ui.title,
                 fontSize = 12.sp,
                 fontWeight = FontWeight(500),
-                color = if (ui.muted) TitleColorMuted else TitleColor,
+                color = if (ui.muted) palette.titleMuted else palette.title,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -201,23 +329,14 @@ internal fun ApprovalCard(
                     fontSize = 11.5.sp,
                     fontFamily = FontFamily.Monospace,
                     lineHeight = 17.sp,
-                    color = if (ui.muted) OperationColorMuted else OperationColor,
+                    color = if (ui.muted) palette.commandMuted else palette.command,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 5.dp),
                 )
             }
         }
-        ui.options.forEachIndexed { index, option ->
-            if (index > 0) {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(start = 52.dp)
-                        .height(1.dp)
-                        .background(if (ui.muted) CardLineMuted else CardLine),
-                )
-            }
+        ui.options.forEach { option ->
             val chosen = ui.chosenLabel == option.label
             Row(
                 Modifier
@@ -231,14 +350,16 @@ internal fun ApprovalCard(
                     Modifier
                         .size(26.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (ui.muted) BadgeBgMuted else BadgeBg),
+                        .background(
+                            if (ui.muted) palette.badgeBackgroundMuted else palette.badgeBackground,
+                        ),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         option.letter,
                         fontSize = 11.5.sp,
                         fontWeight = FontWeight(560),
-                        color = if (ui.muted) BadgeTextMuted else BadgeText,
+                        color = if (ui.muted) palette.badgeTextMuted else palette.badgeText,
                     )
                 }
                 Spacer(Modifier.width(10.dp))
@@ -246,7 +367,7 @@ internal fun ApprovalCard(
                     option.label,
                     modifier = Modifier.weight(1f),
                     fontSize = 14.sp,
-                    color = if (ui.muted) OptionColorMuted else OptionColor,
+                    color = if (ui.muted) palette.optionMuted else palette.option,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -255,24 +376,25 @@ internal fun ApprovalCard(
                         "✓",
                         fontSize = 14.sp,
                         fontWeight = FontWeight(560),
-                        color = if (ui.muted) BadgeTextMuted else BadgeText,
+                        color = palette.check,
                         modifier = Modifier.padding(start = 8.dp),
                     )
                 }
             }
         }
+        // 选项之间不再分隔；仅在底部说明上方保留一条整宽的分隔线。
         Box(
             Modifier
                 .fillMaxWidth()
                 .height(1.dp)
-                .background(if (ui.muted) CardLineMuted else CardLine),
+                .background(if (ui.muted) palette.dividerMuted else palette.divider),
         )
         Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
             ui.error?.let { message ->
                 Text(
                     message,
                     fontSize = 11.sp,
-                    color = ErrorColor,
+                    color = palette.error,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(bottom = 4.dp),
@@ -281,7 +403,7 @@ internal fun ApprovalCard(
             Text(
                 ui.footer,
                 fontSize = 10.5.sp,
-                color = if (ui.muted) TitleColorMuted else FooterColor,
+                color = if (ui.muted) palette.footerMuted else palette.footer,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

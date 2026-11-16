@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -340,26 +341,29 @@ internal fun ApprovalCard(
             ),
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
-            // 大白话摘要就是卡片头条：亮色、16sp、半粗，一眼先看到「批什么」。
-            // 右上角是「1/N」位置文案，只有多张卡时才出现。
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            // 大白话摘要就是卡片头条：亮色、16sp、半粗，最多两行，一眼先看到「批什么」。
+            // 「1/N」位置文案单独占上方一行右对齐的小灰字，不跟标题抢宽度；单卡不显示。
+            Column(Modifier.fillMaxWidth()) {
+                if (!positionLabel.isNullOrBlank()) {
+                    Text(
+                        positionLabel,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.End,
+                        fontSize = 10.5.sp,
+                        lineHeight = 12.sp,
+                        color = if (ui.muted) palette.footerMuted else palette.footer,
+                    )
+                }
                 Text(
                     ui.title,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth(),
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = if (ui.muted) palette.titleMuted else palette.title,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
+                    softWrap = true,
                 )
-                if (!positionLabel.isNullOrBlank()) {
-                    Text(
-                        positionLabel,
-                        fontSize = 10.5.sp,
-                        color = if (ui.muted) palette.footerMuted else palette.footer,
-                        modifier = Modifier.padding(start = 8.dp, top = 3.dp),
-                    )
-                }
             }
             if (ui.summaryReason.isNotBlank()) {
                 // 审批原因用警示琥珀色，提示风险但不当作红色告警。

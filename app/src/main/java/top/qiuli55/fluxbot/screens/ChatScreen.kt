@@ -36,6 +36,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
@@ -110,6 +111,14 @@ import java.util.UUID
 
 private val CHIPS = listOf("总结未读消息", "安排今天", "查一下资料", "写一条周报")
 private val DockBg = Color(0xFF0D1013)
+
+/**
+ * 审批卡横滑翻页阈值：手指位移超过页宽的 25% 就翻页。
+ *
+ * HorizontalPager 默认阈值是 0.5，约 300ms / 600px 的快速轻扫翻不过去；
+ * 这里只调低阈值，翻页方向和一次最多一页的行为保持不变。
+ */
+internal const val approvalPagerSnapThreshold = 0.25f
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -726,6 +735,10 @@ fun ChatScreen(botId: String) {
                             HorizontalPager(
                                 state = pagerState,
                                 modifier = Modifier.widthIn(max = cardMaxWidth),
+                                flingBehavior = PagerDefaults.flingBehavior(
+                                    state = pagerState,
+                                    snapPositionalThreshold = approvalPagerSnapThreshold,
+                                ),
                             ) { page ->
                                 val decision = pendingDecisions.getOrNull(page)
                                 if (decision != null) {

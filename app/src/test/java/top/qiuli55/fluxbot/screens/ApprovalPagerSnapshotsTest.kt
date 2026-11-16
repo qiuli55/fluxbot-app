@@ -132,4 +132,61 @@ class ApprovalPagerSnapshotsTest {
             )
         }
     }
+
+    /** 真实长绝对路径标题：位置文案独占标题上方一行，标题最多两行。 */
+    private val longPathTitle = first.copy(
+        decisionId = "dec-long-path-title",
+        summary = "删除文件 /opt/projects/v05/mac-test/backend/runtime-home/bots/"
+            + "rt-long-path-file.txt",
+        raisedAt = "2026-11-17T21:03:00+00:00",
+        expiresAt = "2026-11-17T21:08:00+00:00",
+    )
+
+    /** 不带空格也没有连字符的超长文件名：必须在 token 内部换行，而不是整段省略。 */
+    private val longUnbrokenTitle = first.copy(
+        decisionId = "dec-long-unbroken-title",
+        summary = "删除文件 rtlongpathfilewithareallylongnameandnospacesatall.txt",
+        raisedAt = "2026-11-17T21:03:30+00:00",
+        expiresAt = "2026-11-17T21:08:30+00:00",
+    )
+
+    @Test
+    fun firstOfTwoCardsWithLongTitle() {
+        paparazzi.snapshot(name = "46-approval-pager-1-of-2-long-title") {
+            ChatSnapshot(
+                bot = bot,
+                messages = messages,
+                pending = longPathTitle,
+                additionalPending = listOf(first),
+                initialApprovalPage = 0,
+                fontFamily = chinese,
+            )
+        }
+    }
+
+    @Test
+    fun secondOfTwoCardsWithLongTitle() {
+        paparazzi.snapshot(name = "47-approval-pager-2-of-2-long-title") {
+            ChatSnapshot(
+                bot = bot,
+                messages = messages,
+                pending = longPathTitle,
+                additionalPending = listOf(longUnbrokenTitle),
+                initialApprovalPage = 1,
+                fontFamily = chinese,
+            )
+        }
+    }
+
+    @Test
+    fun singleCardWithLongUnbrokenTitle() {
+        paparazzi.snapshot(name = "48-approval-card-single-long-title") {
+            ChatSnapshot(
+                bot = bot,
+                messages = messages,
+                pending = longUnbrokenTitle,
+                fontFamily = chinese,
+            )
+        }
+    }
 }

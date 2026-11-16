@@ -1053,6 +1053,7 @@ private fun McpAddSheet() {
 private fun PermissionsSheet(botId: String) {
     val store = LocalStore.current
     val bot = store.bot(botId) ?: return
+    val scope = rememberCoroutineScope()
     val items = listOf(
         "files" to ("读写文件" to "在 Bot 的电脑上读取与写入文件"),
         "shell" to ("执行命令" to "运行终端命令与脚本"),
@@ -1060,7 +1061,11 @@ private fun PermissionsSheet(botId: String) {
         "apps" to ("使用连接应用" to "读取你已连接的应用数据"),
     )
     SheetFrame("权限") {
-        SheetHint("默认权限全开。可以在这里单独关掉某一项；正在执行的任务会在下一步停下。", top = 0)
+        SheetHint(
+            "默认权限全开。开关会保存到服务器，重新安装或换设备后仍保留；" +
+                "当前版本尚未在执行时按这些开关拦截（删除资料等仍按审批规则确认）。",
+            top = 0,
+        )
         Spacer(Modifier.height(4.dp))
         items.forEach { (key, pair) ->
             Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
@@ -1075,7 +1080,9 @@ private fun PermissionsSheet(botId: String) {
                         modifier = Modifier.padding(top = 3.dp),
                     )
                 }
-                FluxSwitch(bot.permissions[key] ?: true) { store.togglePermission(botId, key) }
+                FluxSwitch(bot.permissions[key] ?: true) {
+                    scope.launch { store.togglePermission(botId, key) }
+                }
             }
         }
     }

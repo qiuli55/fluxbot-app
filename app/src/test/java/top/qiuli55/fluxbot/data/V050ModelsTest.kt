@@ -275,6 +275,46 @@ class V050ModelsTest {
         assertNull(validateMcpForm("知识库", "http://a.com", "Authorization", "Bearer x"))
     }
 
+    // ---------- Bot 权限 ----------
+
+    @Test
+    fun parsesBotPermissions() {
+        val permissions = parseBotPermissions(
+            JSONObject().put(
+                "permissions",
+                JSONObject()
+                    .put("files", true)
+                    .put("shell", false)
+                    .put("network", true)
+                    .put("apps", false),
+            ),
+        )
+        assertEquals(
+            mapOf("files" to true, "shell" to false, "network" to true, "apps" to false),
+            permissions,
+        )
+    }
+
+    @Test
+    fun botPermissionsTreatMissingKeysAsUnset() {
+        // 旧服务端 / 未保存过：整个字段缺失 → 空表，界面按「开启」兜底。
+        assertEquals(emptyMap<String, Boolean>(), parseBotPermissions(JSONObject()))
+        assertEquals(
+            emptyMap<String, Boolean>(),
+            parseBotPermissions(JSONObject().put("permissions", JSONObject.NULL)),
+        )
+        // 只返回一项时只解析这一项；未知 key 忽略，不污染界面状态。
+        assertEquals(
+            mapOf("shell" to false),
+            parseBotPermissions(
+                JSONObject().put(
+                    "permissions",
+                    JSONObject().put("shell", false).put("bogus", true),
+                ),
+            ),
+        )
+    }
+
     // ---------- 错误文案 ----------
 
     @Test

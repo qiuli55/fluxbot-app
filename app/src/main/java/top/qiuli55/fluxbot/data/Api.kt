@@ -25,6 +25,8 @@ data class RemoteBot(
     val chatTaskId: String = "",
     /** 当前连接到这个 Bot 的通道 key（feishu / wechat / wecom / dingtalk）。 */
     val channels: List<String> = emptyList(),
+    /** 服务端持久化的四项权限开关（files / shell / network / apps）；缺失 = 开启。 */
+    val permissions: Map<String, Boolean> = emptyMap(),
 )
 
 /** 后端异步会话里的一轮对话。 */
@@ -453,6 +455,21 @@ class Api internal constructor(
             if (!keyId.isNullOrBlank() && model.isNotBlank()) body.put("key_id", keyId)
             request("POST", "/api/v1/bots/$botId/model", body)
         }
+
+    /**
+     * 保存 Bot 的四项权限开关（files / shell / network / apps）。
+     *
+     * 服务端只持久化与回读：v0.5 尚未按这些开关在执行期强制，UI 文案必须如实说明。
+     */
+    suspend fun updateBotPermissions(
+        botId: String,
+        permissions: Map<String, Boolean>,
+    ): RemoteBot = withContext(Dispatchers.IO) {
+        val switches = JSONObject()
+        permissions.forEach { (key, on) -> switches.put(key, on) }
+        val body = JSONObject().put("permissions", switches)
+        parseBot(request("PATCH", "/api/v1/bots/$botId", body).getJSONObject("data"))
+    }
 
     /** 发一条聊天消息，返回模型的回复文本。 */
     suspend fun sendMessage(taskId: String, content: String): String =
@@ -1010,6 +1027,7 @@ class Api internal constructor(
         taskId = o.optStringOrEmpty("last_task_id").takeUnless { it == "null" }.orEmpty(),
         chatTaskId = o.optStringOrEmpty("chat_task_id").takeUnless { it == "null" }.orEmpty(),
         channels = parseBotChannels(o),
+        permissions = parseBotPermissions(o),
     )
 
     /** 后端列表接口通常把数组放在 data 里；也兼容 data 对象内再包一层。 */

@@ -66,6 +66,21 @@ internal fun parseBotChannels(o: JSONObject): List<String> {
     }.distinct()
 }
 
+/** Bot 详情「设置 → 权限」的四项；与服务端 bots.permissions 的 key 一一对应。 */
+internal val BOT_PERMISSION_KEYS = listOf("files", "shell", "network", "apps")
+
+/**
+ * 解析服务端持久化的权限开关。
+ *
+ * 只保留四项已知 key；字段缺失（旧服务端 / 从未保存）返回空表，由界面按「开启」兜底。
+ */
+internal fun parseBotPermissions(o: JSONObject): Map<String, Boolean> {
+    val raw = o.optJSONObject("permissions") ?: return emptyMap()
+    return BOT_PERMISSION_KEYS.mapNotNull { key ->
+        if (!raw.has(key) || raw.isNull(key)) null else key to raw.optBoolean(key, true)
+    }.toMap()
+}
+
 // ---------- 审批设置 ----------
 
 data class BuiltinApprovalRule(

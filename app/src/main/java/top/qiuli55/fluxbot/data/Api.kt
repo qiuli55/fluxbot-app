@@ -4,13 +4,17 @@ import android.content.Context
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.ConnectException
+import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
+import java.net.URL
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
 
@@ -135,6 +139,8 @@ internal fun parsePendingDecision(taskId: String, o: JSONObject): PendingDecisio
         // 旧后端没有这两个字段：保持 null，卡片就不显示时长，而不是继续写死 10 分钟。
         timeoutSeconds = o.optInt("timeout_seconds", 0).takeIf { it > 0 },
         expiresAt = o.optStringOrEmpty("expires_at"),
+        // 加字段：卡片展示顺序与「首次出现延迟」日志都用它；旧后端为空串。
+        raisedAt = o.optStringOrEmpty("raised_at"),
     )
 }
 
@@ -143,6 +149,9 @@ internal fun parsePendingDecision(taskId: String, o: JSONObject): PendingDecisio
  *
  * 子任务的审批必须回到 Bot 聊天里展示，所以这个函数同时用于
  * `/bots/{id}/tasks` 与 `/bots/{id}/subtasks` 两个列表。
+ *
+ * 新后端会下发 `pending_decisions` 数组（一条任务上可能同时挂多张卡）；
+ * 旧后端只有单值 `pending_decision`，这里保留回落，保证旧服务端照常可用。
  */
 internal fun parsePendingDecisionTasks(tasks: JSONArray): List<PendingDecision> {
     val found = ArrayList<PendingDecision>()
@@ -150,6 +159,14 @@ internal fun parsePendingDecisionTasks(tasks: JSONArray): List<PendingDecision> 
         val task = tasks.optJSONObject(index) ?: continue
         val taskId = task.optStringOrEmpty("id")
         if (taskId.isEmpty()) continue
+        val many = task.optJSONArray("pending_decisions")
+        if (many != null) {
+            for (i in 0 until many.length()) {
+                val item = many.optJSONObject(i) ?: continue
+                parsePendingDecision(taskId, item)?.let(found::add)
+            }
+            continue
+        }
         val pending = task.optJSONObject("pending_decision") ?: continue
         parsePendingDecision(taskId, pending)?.let(found::add)
     }
@@ -187,6 +204,8 @@ data class PendingDecision(
     val timeoutSeconds: Int? = null,
     /** 审批截止时间（ISO 8601）；旧后端缺省为空。 */
     val expiresAt: String = "",
+    /** 审批发起时间（ISO 8601）；卡片按它从旧到新排列，旧后端为空串。 */
+    val raisedAt: String = "",
 )
 
 /** 远端 Bot 的一条长期记忆。 */
@@ -751,17 +770,32 @@ class Api internal constructor(
      *
      * 先查所有 waiting_for_user_decision 的任务；如果已知 chatTaskId 且它不在列表里，
      * 再单独取一次 /tasks/{chatTaskId}，避免聊天任务因分页 / 过滤条件被漏掉。
+     *
+     * 三个来源互相独立：某个来源失败不再丢弃已经拿到的结果（上一版最后一个
+     * 可选请求抛出时会把顶层任务与子任务的审批一起吞掉，卡片因此要等下一次
+     * 轮询才出现）。三个来源都失败才把异常交给调用方，让它按退避重试。
+     * 单次超时压到 15 秒：三个串行请求最坏 45 秒，而不是原来的 3 分钟。
      */
     suspend fun listPendingDecisions(
         botId: String,
         chatTaskId: String = "",
     ): List<PendingDecision> = withContext(Dispatchers.IO) {
         val found = LinkedHashMap<String, PendingDecision>()
-        val tasks = request(
-            "GET",
-            "/api/v1/bots/$botId/tasks?status=waiting_for_user_decision",
-            null,
-        ).dataArray()
+        var failure: Exception? = null
+        val tasks = try {
+            request(
+                "GET",
+                "/api/v1/bots/$botId/tasks?status=waiting_for_user_decision",
+                null,
+                timeoutMs = PENDING_LOOKUP_TIMEOUT_MS,
+            ).dataArray()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            failure = e
+            logDebug("pending top-level decisions unavailable: ${e.message.orEmpty()}")
+            JSONArray()
+        }
         parsePendingDecisionTasks(tasks).forEach { found[it.decisionId] = it }
         // Bot 的实际工作在子任务里跑：审批也常挂在子任务上，必须一起收进聊天卡片。
         // 旧后端没有这个过滤参数时退回空列表，不能因此让顶层任务的审批也看不到。
@@ -770,28 +804,51 @@ class Api internal constructor(
                 "GET",
                 "/api/v1/bots/$botId/subtasks?status=waiting_for_user_decision",
                 null,
+                timeoutMs = PENDING_LOOKUP_TIMEOUT_MS,
             ).dataArray()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (failure == null) failure = e
             logDebug("pending subtask decisions unavailable: ${e.message.orEmpty()}")
             JSONArray()
         }
         parsePendingDecisionTasks(subtaskTasks).forEach { found[it.decisionId] = it }
         val chatId = chatTaskId.trim().takeUnless { it == "null" }.orEmpty()
         if (chatId.isNotEmpty() && found.values.none { it.taskId == chatId }) {
-            getTaskPending(chatId)?.let { found[it.decisionId] = it }
+            try {
+                getTaskPending(chatId).forEach { found[it.decisionId] = it }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (failure == null) failure = e
+                logDebug("pending chat task decision unavailable: ${e.message.orEmpty()}")
+            }
         }
-        found.values.toList()
+        if (found.isEmpty()) failure?.let { throw it }
+        mergePendingDecisions(listOf(found.values.toList()))
     }
 
-    /** 单独读取一个任务的待批准决策；没有则返回 null。 */
-    suspend fun getTaskPending(taskId: String): PendingDecision? = withContext(Dispatchers.IO) {
-        val root = request("GET", "/api/v1/tasks/$taskId", null)
-        val data = root.optJSONObject("data") ?: root
-        val pending = data.optJSONObject("pending_decision") ?: return@withContext null
-        parsePendingDecision(taskId, pending)
-    }
+    /** 单独读取一个任务的全部待批准决策；没有则返回空列表。 */
+    suspend fun getTaskPending(taskId: String): List<PendingDecision> =
+        withContext(Dispatchers.IO) {
+            val root = request(
+                "GET",
+                "/api/v1/tasks/$taskId",
+                null,
+                timeoutMs = PENDING_LOOKUP_TIMEOUT_MS,
+            )
+            val data = root.optJSONObject("data") ?: root
+            // 新后端用列表字段一次给全；旧后端回落到单值字段。
+            val many = data.optJSONArray("pending_decisions")
+            if (many != null) {
+                return@withContext (0 until many.length()).mapNotNull { index ->
+                    many.optJSONObject(index)?.let { parsePendingDecision(taskId, it) }
+                }
+            }
+            val pending = data.optJSONObject("pending_decision") ?: return@withContext emptyList()
+            listOfNotNull(parsePendingDecision(taskId, pending))
+        }
 
     /**
      * 选择某个决策选项。
@@ -810,6 +867,59 @@ class Api internal constructor(
             .put("option", option)
         request("POST", "/api/v1/tasks/$taskId/decisions/choose", body)
         Unit
+    }
+
+    /**
+     * 订阅 Bot 级审批事件流（SSE），连接断开或出错时抛异常，由调用方重连。
+     *
+     * 服务端先发一条 `ready` 快照（当前所有待决策），之后转发 approval.raised /
+     * approval.resolved。这里按 SSE 规范用空行分帧：读到空行就把累积的块交给
+     * [parseApprovalEventFrame]，注释行（`: keep-alive`）会被忽略。
+     *
+     * 与 [request] 不同，这里保持长连接不设整体超时：连接 / 单次读各有 15 秒和
+     * 90 秒上限，服务端每 15 秒发一次 keep-alive；协程取消时在 finally 断开。
+     */
+    internal suspend fun streamApprovalEvents(
+        botId: String,
+        onEvent: suspend (ApprovalEvent) -> Unit,
+    ): Unit = withContext(Dispatchers.IO) {
+        val connection = (URL("$baseUrl/api/v1/bots/$botId/approval-events")
+            .openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15_000
+            readTimeout = 90_000
+            setRequestProperty("Accept", "text/event-stream")
+            setRequestProperty("Cache-Control", "no-cache")
+            authToken.takeIf { it.isNotBlank() }?.let {
+                setRequestProperty("Authorization", "Bearer $it")
+            }
+            accountId?.takeIf { it.isNotBlank() }?.let { setRequestProperty("X-Flux-Account", it) }
+        }
+        try {
+            val code = connection.responseCode
+            if (code == 401) {
+                throw ApiException("登录已过期，请重新登录", 401, "cloud_expired")
+            }
+            if (code !in 200..299) {
+                throw ApiException("审批事件流连接失败（HTTP $code）", code)
+            }
+            val reader = connection.inputStream.bufferedReader(Charsets.UTF_8)
+            val block = StringBuilder()
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val line = reader.readLine() ?: break
+                if (line.isEmpty()) {
+                    parseApprovalEventFrame(block.toString())?.let { onEvent(it) }
+                    block.setLength(0)
+                } else if (!line.startsWith(":")) {
+                    block.append(line).append('\n')
+                }
+            }
+        } finally {
+            connection.disconnect()
+        }
+        // 服务端正常关流（例如部署重启）：当作一次断开，让调用方退避后重连。
+        throw IOException("审批事件流已断开")
     }
 
     // ---------- 全局审批规则 ----------
@@ -1174,6 +1284,9 @@ class Api internal constructor(
         private const val SYS_TOKEN_KEY = "sys.api_token"
 
         const val DEFAULT_BASE_URL = "https://flux.qiuli55.top/bot"
+
+        /** 查待决策的单次超时：卡片要快，宁可失败退避也不挂住几分钟。 */
+        private const val PENDING_LOOKUP_TIMEOUT_MS = 15_000
     }
 }
 

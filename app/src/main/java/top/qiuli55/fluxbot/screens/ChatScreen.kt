@@ -77,6 +77,7 @@ import org.json.JSONObject
 import top.qiuli55.fluxbot.data.ComponentAction
 import top.qiuli55.fluxbot.data.Message
 import top.qiuli55.fluxbot.data.PendingDecision
+import top.qiuli55.fluxbot.data.RemoteMessage
 import top.qiuli55.fluxbot.data.listRoutineDetails
 import top.qiuli55.fluxbot.data.routineTriggerSummary
 import top.qiuli55.fluxbot.data.updateRoutineDetail
@@ -129,6 +130,36 @@ fun ChatScreen(botId: String) {
 
     LaunchedEffect(messages.size) { store.markRead(botId) }
 
+    /**
+     * 子任务在聊天轮次结束后才收尾：把终态消息补进本地列表。
+     *
+     * 服务端已把 completion/failure 写成普通 text 回复（payload 仍带 subtask_id），
+     * 所以这里只追加这类消息，不影响用户自己刚发出的本地气泡。
+     */
+    suspend fun syncSubtaskResults() {
+        val b = store.bot(botId) ?: return
+        if (!b.remote || b.group || b.id.isBlank()) return
+        try {
+            val remote = store.api.conversation(b.id)
+            val seen = b.messages.map(::subtaskResultKey).toMutableSet()
+            remote.filter(::isVisibleSubtaskResult).forEach { item ->
+                val key = subtaskResultKey(item)
+                if (!seen.add(key)) return@forEach
+                store.addMessage(
+                    botId = botId,
+                    role = "bot",
+                    text = item.displayText(),
+                    kind = item.kind,
+                    payload = item.payload,
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 结果轮询失败保持安静；下一轮再试。
+        }
+    }
+
     // 远端 Bot：可见期间持续轮询待批准决策；离开页面后自动取消。
     suspend fun pollPendingDecisions() {
         val b = store.bot(botId) ?: return
@@ -149,6 +180,15 @@ fun ChatScreen(botId: String) {
         while (true) {
             pollPendingDecisions()
             delay(2000)
+        }
+    }
+
+    // 后台子任务收尾晚于本轮聊天：单独轮询对话，把终态当成普通 Bot 回复补进来。
+    LaunchedEffect(botId, bot.remote) {
+        if (!bot.remote || bot.group) return@LaunchedEffect
+        while (true) {
+            syncSubtaskResults()
+            delay(5000)
         }
     }
 
@@ -680,6 +720,27 @@ internal fun isHiddenMessageKind(kind: String): Boolean = kind == "subtask"
 /** 对话列表真正渲染的消息：过滤掉后台子任务。 */
 internal fun visibleMessages(messages: List<Message>): List<Message> =
     messages.filterNot { isHiddenMessageKind(it.kind) }
+
+/** 子任务终态：服务端写成普通 text 回复，聊天里要直接展示。 */
+private val TERMINAL_SUBTASK_STATUSES = setOf("completed", "failed", "cancelled")
+
+/**
+ * 是否是应在聊天里补显示的子任务终态回复。
+ *
+ * 开始/进度仍是 kind=subtask（隐藏）；只有终态的普通 text 回复带 subtask_id。
+ */
+internal fun isVisibleSubtaskResult(message: RemoteMessage): Boolean =
+    message.kind == "text" &&
+        message.payload["subtask_id"].orEmpty().isNotBlank() &&
+        message.payload["status"].orEmpty() in TERMINAL_SUBTASK_STATUSES
+
+private fun subtaskResultKey(message: RemoteMessage): String =
+    "${message.payload["subtask_id"].orEmpty()}|" +
+        "${message.payload["status"].orEmpty()}|${message.displayText()}"
+
+private fun subtaskResultKey(message: Message): String =
+    "${message.payload["subtask_id"].orEmpty()}|" +
+        "${message.payload["status"].orEmpty()}|${message.displayText()}"
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

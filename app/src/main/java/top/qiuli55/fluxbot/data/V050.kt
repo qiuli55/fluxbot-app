@@ -212,6 +212,21 @@ internal fun parseMcpConnection(o: JSONObject): RemoteMcpConnection? {
     )
 }
 
+/** 传输类型的中文展示名；未知值原样返回，避免把服务端新值藏掉。 */
+fun mcpTransportLabel(transport: String): String = when (transport.trim().lowercase()) {
+    "" -> "未知"
+    "streamable_http" -> "Streamable HTTP"
+    "sse" -> "SSE"
+    "stdio" -> "stdio"
+    else -> transport.trim()
+}
+
+/** 鉴权头值只展示服务端脱敏结果；没有配置头时返回 null。 */
+fun mcpMaskedHeaderValue(connection: RemoteMcpConnection): String? {
+    if (connection.headerName.isBlank() && connection.headerValueMasked.isBlank()) return null
+    return connection.headerValueMasked.ifBlank { "已保存（未返回脱敏值）" }
+}
+
 /** 列表展示用主机名：去掉协议、路径、查询和用户信息。 */
 fun mcpUrlHost(url: String): String {
     val raw = url.trim()

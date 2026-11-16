@@ -335,4 +335,50 @@ class V050ModelsTest {
         val root = JSONObject().put("message", JSONObject.NULL)
         assertEquals("连接失败，请检查地址和鉴权头", apiErrorMessage(root, 422))
     }
+
+    // ---------- 自定义 MCP 详情 ----------
+
+    @Test
+    fun mcpTransportLabelIsHumanReadable() {
+        assertEquals("Streamable HTTP", mcpTransportLabel("streamable_http"))
+        assertEquals("SSE", mcpTransportLabel("SSE"))
+        assertEquals("stdio", mcpTransportLabel("stdio"))
+        assertEquals("未知", mcpTransportLabel("  "))
+        // 服务端将来新增的传输类型原样展示，不静默吞掉。
+        assertEquals("websocket", mcpTransportLabel("websocket"))
+    }
+
+    @Test
+    fun mcpDetailOnlyExposesMaskedHeader() {
+        val connection = parseMcpConnection(
+            JSONObject()
+                .put("id", "m-detail")
+                .put("name", "deepwiki-auth")
+                .put("url", "https://mcp.deepwiki.com/mcp")
+                .put("transport", "streamable_http")
+                .put("tool_count", 3)
+                .put("header_name", "Authorization")
+                .put("header_value_masked", "Bear****7890")
+                .put("header_value", "Bearer test-dummy-1234567890"),
+        )!!
+
+        assertEquals("Bear****7890", mcpMaskedHeaderValue(connection))
+        assertTrue(!connection.toString().contains("test-dummy-1234567890"))
+    }
+
+    @Test
+    fun mcpDetailWithoutHeaderHasNoMaskedValue() {
+        val connection = parseMcpConnection(JSONObject().put("id", "m-plain"))!!
+        assertNull(mcpMaskedHeaderValue(connection))
+    }
+
+    @Test
+    fun mcpDetailWithNameButNoMaskedValueSaysSaved() {
+        val connection = parseMcpConnection(
+            JSONObject()
+                .put("id", "m-old")
+                .put("header_name", "Authorization"),
+        )!!
+        assertEquals("已保存（未返回脱敏值）", mcpMaskedHeaderValue(connection))
+    }
 }

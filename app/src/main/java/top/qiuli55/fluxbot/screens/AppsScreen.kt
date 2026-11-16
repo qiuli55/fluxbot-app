@@ -216,7 +216,11 @@ fun AppsScreen() {
                     )
                     mcpConnections.isEmpty() -> McpHintRow("还没有添加。连上一个 MCP 服务，Bot 就能用它的工具。")
                     else -> mcpConnections.forEach { item ->
-                        McpConnectionRow(item, onDelete = { deleteMcp(item) })
+                        McpConnectionRow(
+                            item,
+                            onOpen = { ui.sheet = Sheet.McpDetail(item) },
+                            onDelete = { deleteMcp(item) },
+                        )
                     }
                 }
                 Row(
@@ -373,10 +377,17 @@ private fun SelfHostedRow(
 }
 
 @Composable
-private fun McpConnectionRow(item: RemoteMcpConnection, onDelete: () -> Unit) {
+private fun McpConnectionRow(
+    item: RemoteMcpConnection,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+) {
     Column {
         Row(
-            Modifier.fillMaxWidth().padding(vertical = 12.dp),
+            Modifier
+                .fillMaxWidth()
+                .clickable { onOpen() }
+                .padding(vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(

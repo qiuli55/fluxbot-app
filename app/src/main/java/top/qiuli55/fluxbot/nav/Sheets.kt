@@ -64,6 +64,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
@@ -76,12 +77,16 @@ import top.qiuli55.fluxbot.data.CloudSettings
 import top.qiuli55.fluxbot.data.DeviceLogin
 import top.qiuli55.fluxbot.data.ModelCatalog
 import top.qiuli55.fluxbot.data.RemoteConnector
+import top.qiuli55.fluxbot.data.RemoteMcpConnection
 import top.qiuli55.fluxbot.data.RemoteRoutineDetail
 import top.qiuli55.fluxbot.data.RemoteVaultLogin
 import top.qiuli55.fluxbot.data.VaultSecrets
 import top.qiuli55.fluxbot.data.appendJournal
 import top.qiuli55.fluxbot.data.createMcpConnection
 import top.qiuli55.fluxbot.data.createSkill
+import top.qiuli55.fluxbot.data.deleteMcpConnection
+import top.qiuli55.fluxbot.data.mcpMaskedHeaderValue
+import top.qiuli55.fluxbot.data.mcpTransportLabel
 import top.qiuli55.fluxbot.data.createSubtask
 import top.qiuli55.fluxbot.data.linkChannel
 import top.qiuli55.fluxbot.data.deleteProfile
@@ -125,6 +130,7 @@ sealed interface Sheet {
     data class Model(val botId: String) : Sheet
     data class ChannelBot(val channel: String, val label: String) : Sheet
     data object McpAdd : Sheet
+    data class McpDetail(val connection: RemoteMcpConnection) : Sheet
     data object Timezone : Sheet
     data object Appearance : Sheet
     data object Language : Sheet
@@ -276,6 +282,7 @@ private fun SheetBody(sheet: Sheet) {
         is Sheet.Model -> ModelSheet(sheet.botId)
         is Sheet.ChannelBot -> ChannelBotSheet(sheet.channel, sheet.label)
         Sheet.McpAdd -> McpAddSheet()
+        is Sheet.McpDetail -> McpDetailSheet(sheet.connection)
         Sheet.Timezone -> TimezoneSheet()
         Sheet.Appearance -> AppearanceSheet()
         Sheet.Language -> LanguageSheet()
@@ -1046,6 +1053,87 @@ private fun McpAddSheet() {
                 }
             }
         }
+    }
+}
+
+/**
+ * 已保存的自定义 MCP 详情：名称、地址、传输、工具数、鉴权头（仅脱敏值）。
+ *
+ * 服务端从不返回鉴权头明文；这里即使拿到模型对象也只读 headerValueMasked。
+ */
+@Composable
+private fun McpDetailSheet(connection: RemoteMcpConnection) {
+    val store = LocalStore.current
+    val ui = LocalUi.current
+    val masked = mcpMaskedHeaderValue(connection)
+
+    fun delete() {
+        ui.sheet = Sheet.Confirm(
+            title = "删除 ${connection.name}？",
+            text = "删除后，Bot 将不能再调用这个服务提供的工具。",
+            action = "删除",
+            danger = true,
+        ) {
+            ui.scope.launch {
+                try {
+                    store.api.deleteMcpConnection(connection.id)
+                    Log.d("FluxBot/V040", "mcp connection deleted id=${connection.id}")
+                    ui.refreshData()
+                    ui.showToast("已删除 ${connection.name}")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("FluxBot/V040", "delete mcp connection failed id=${connection.id}", e)
+                    ui.showToast(e.message ?: "删除失败")
+                }
+            }
+        }
+    }
+
+    SheetFrame("自定义 MCP") {
+        Row(
+            Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(Flux.panel2),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("M", fontSize = 15.sp, fontWeight = FontWeight(620), color = Flux.accent)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    connection.name,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight(560),
+                    color = Flux.text,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    connection.hostText().ifBlank { "地址未保存" },
+                    fontSize = 11.5.sp,
+                    color = Flux.text3,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+        }
+
+        DetailRow("名称", connection.name)
+        DetailRow("地址", connection.url.ifBlank { "未保存" })
+        DetailRow("主机", connection.hostText().ifBlank { "未保存" })
+        DetailRow("传输", mcpTransportLabel(connection.transport))
+        DetailRow("工具", connection.toolCountText())
+        DetailRow("鉴权头", connection.headerName.ifBlank { "无" })
+        DetailRow("头的值", masked ?: "无")
+        if (masked != null) {
+            SheetHint("只显示服务端脱敏后的值，完整内容不会发送到手机上。")
+        }
+        Spacer(Modifier.height(16.dp))
+        DangerButton("删除此连接") { delete() }
+        Spacer(Modifier.height(10.dp))
+        SecondaryButton("关闭") { ui.closeSheet() }
     }
 }
 

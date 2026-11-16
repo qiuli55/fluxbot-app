@@ -47,6 +47,7 @@ data class RemoteTurn(
  * 解析失败时保留 [content] / [fallbackText] 走纯文本。
  */
 data class RemoteMessage(
+    val id: String = "",
     val role: String,
     val content: String,
     val kind: String = "text",
@@ -78,6 +79,7 @@ internal fun parseRemoteMessage(o: JSONObject): RemoteMessage? {
     }
     val envelope = parseComponentEnvelope(payload)
     return RemoteMessage(
+        id = o.optStringOrEmpty("id"),
         role = role,
         content = content,
         kind = kind,
@@ -102,6 +104,50 @@ internal fun flattenPayload(payload: JSONObject?): Map<String, String> {
         }
     }
     return result
+}
+
+/** 解析一条任务里的待批准决策（options 兼容字符串与对象两种上游形状）。 */
+internal fun parsePendingDecision(taskId: String, o: JSONObject): PendingDecision? {
+    val id = o.optStringOrEmpty("id")
+    if (id.isEmpty()) return null
+    val options = o.optJSONArray("options")?.let { array ->
+        (0 until array.length()).mapNotNull { index ->
+            when (val item = array.opt(index)) {
+                is JSONObject -> item.optStringOrEmpty("label")
+                    .ifBlank { item.optStringOrEmpty("option") }
+                    .takeIf { it.isNotBlank() }
+                is String -> item.takeIf { it.isNotBlank() }
+                else -> null
+            }
+        }
+    }.orEmpty()
+    return PendingDecision(
+        taskId = taskId,
+        decisionId = id,
+        question = o.optStringOrEmpty("question").ifBlank { "需要你批准" },
+        detail = o.optStringOrEmpty("context"),
+        options = options,
+        kind = o.optStringOrEmpty("kind"),
+        meta = flattenPayload(o.optJSONObject("meta")),
+    )
+}
+
+/**
+ * 从任务列表（Bot 顶层任务或子任务）里收集待批准决策。
+ *
+ * 子任务的审批必须回到 Bot 聊天里展示，所以这个函数同时用于
+ * `/bots/{id}/tasks` 与 `/bots/{id}/subtasks` 两个列表。
+ */
+internal fun parsePendingDecisionTasks(tasks: JSONArray): List<PendingDecision> {
+    val found = ArrayList<PendingDecision>()
+    for (index in 0 until tasks.length()) {
+        val task = tasks.optJSONObject(index) ?: continue
+        val taskId = task.optStringOrEmpty("id")
+        if (taskId.isEmpty()) continue
+        val pending = task.optJSONObject("pending_decision") ?: continue
+        parsePendingDecision(taskId, pending)?.let(found::add)
+    }
+    return found
 }
 
 /** 云端密钥库提供的一个可选模型；keyId 空表示运行时原生模型。 */
@@ -702,13 +748,22 @@ class Api internal constructor(
             "/api/v1/bots/$botId/tasks?status=waiting_for_user_decision",
             null,
         ).dataArray()
-        for (i in 0 until tasks.length()) {
-            val task = tasks.optJSONObject(i) ?: continue
-            val taskId = task.optStringOrEmpty("id")
-            if (taskId.isEmpty()) continue
-            val pending = task.optJSONObject("pending_decision") ?: continue
-            parsePendingDecision(taskId, pending)?.let { found[it.decisionId] = it }
+        parsePendingDecisionTasks(tasks).forEach { found[it.decisionId] = it }
+        // Bot 的实际工作在子任务里跑：审批也常挂在子任务上，必须一起收进聊天卡片。
+        // 旧后端没有这个过滤参数时退回空列表，不能因此让顶层任务的审批也看不到。
+        val subtaskTasks = try {
+            request(
+                "GET",
+                "/api/v1/bots/$botId/subtasks?status=waiting_for_user_decision",
+                null,
+            ).dataArray()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logDebug("pending subtask decisions unavailable: ${e.message.orEmpty()}")
+            JSONArray()
         }
+        parsePendingDecisionTasks(subtaskTasks).forEach { found[it.decisionId] = it }
         val chatId = chatTaskId.trim().takeUnless { it == "null" }.orEmpty()
         if (chatId.isNotEmpty() && found.values.none { it.taskId == chatId }) {
             getTaskPending(chatId)?.let { found[it.decisionId] = it }
@@ -1039,31 +1094,6 @@ class Api internal constructor(
             ?: obj.optJSONArray("memories")
             ?: obj.optJSONArray("routines")
             ?: JSONArray()
-    }
-
-    private fun parsePendingDecision(taskId: String, o: JSONObject): PendingDecision? {
-        val id = o.optStringOrEmpty("id")
-        if (id.isEmpty()) return null
-        val options = o.optJSONArray("options")?.let { array ->
-            (0 until array.length()).mapNotNull { index ->
-                when (val item = array.opt(index)) {
-                    is JSONObject -> item.optStringOrEmpty("label")
-                        .ifBlank { item.optStringOrEmpty("option") }
-                        .takeIf { it.isNotBlank() }
-                    is String -> item.takeIf { it.isNotBlank() }
-                    else -> null
-                }
-            }
-        }.orEmpty()
-        return PendingDecision(
-            taskId = taskId,
-            decisionId = id,
-            question = o.optStringOrEmpty("question").ifBlank { "需要你批准" },
-            detail = o.optStringOrEmpty("context"),
-            options = options,
-            kind = o.optStringOrEmpty("kind"),
-            meta = flattenPayload(o.optJSONObject("meta")),
-        )
     }
 
     private fun parseMemory(o: JSONObject): RemoteMemory? {

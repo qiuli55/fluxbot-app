@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import top.qiuli55.fluxbot.data.Message
+import top.qiuli55.fluxbot.data.RemoteMessage
 
 /** 对话可见性与 Bot 详情分区顺序的纯 JVM 测试。 */
 class ChatVisibilityTest {
@@ -51,6 +52,38 @@ class ChatVisibilityTest {
 
         assertEquals(listOf("a", "b", "c"), visibleMessages(messages).map { it.id })
         assertEquals(emptyList<Message>(), visibleMessages(emptyList()))
+    }
+
+    @Test
+    fun subtaskTerminalRepliesAreShownAsNormalBotText() {
+        val completed = RemoteMessage(
+            id = "msg-1",
+            role = "assistant",
+            content = "Linux ... GNU/Linux",
+            kind = "text",
+            payload = mapOf("subtask_id" to "s-1", "status" to "completed"),
+        )
+        val failed = completed.copy(
+            id = "msg-2",
+            content = "执行失败：退出码 1",
+            payload = mapOf("subtask_id" to "s-2", "status" to "failed"),
+        )
+        val progress = completed.copy(
+            id = "msg-3",
+            content = "后台任务「x」已开始",
+            kind = "subtask",
+            payload = mapOf("subtask_id" to "s-3", "status" to "running"),
+        )
+        val ordinary = completed.copy(
+            id = "msg-4",
+            content = "普通回复",
+            payload = emptyMap(),
+        )
+
+        assertTrue(isVisibleSubtaskResult(completed))
+        assertTrue(isVisibleSubtaskResult(failed))
+        assertFalse(isVisibleSubtaskResult(progress))
+        assertFalse(isVisibleSubtaskResult(ordinary))
     }
 
     @Test

@@ -68,6 +68,10 @@ sealed interface ComponentNode {
         val options: List<ChoiceOption> = emptyList(),
         val multiple: Boolean = false,
         val action: ComponentAction? = null,
+        /** 灰色提示文案；缺省时回退卡片副标题，再回退按单选/多选生成的默认提示。 */
+        val hint: String = "",
+        /** 在选项末尾追加「其他」自由输入。 */
+        val allowCustom: Boolean = false,
     ) : ComponentNode
 
     data class Input(
@@ -95,7 +99,18 @@ sealed interface ComponentNode {
     data class Unknown(val type: String) : ComponentNode
 }
 
-data class ChoiceOption(val id: String, val label: String)
+/** 选项缩略图：与 image 节点一致的三选一来源；没有来源时为 null。 */
+data class ChoiceImage(
+    val url: String = "",
+    val deliveryId: String = "",
+    val uploadId: String = "",
+)
+
+data class ChoiceOption(
+    val id: String,
+    val label: String,
+    val image: ChoiceImage? = null,
+)
 
 data class ComponentAction(
     val type: String = "",
@@ -197,7 +212,11 @@ fun parseComponentNode(raw: JSONObject?): ComponentNode? {
                     val o = options.optJSONObject(i) ?: return@mapNotNull null
                     val label = o.optString("label").trim()
                     if (label.isEmpty()) return@mapNotNull null
-                    ChoiceOption(o.optString("id").trim(), label)
+                    ChoiceOption(
+                        id = o.optString("id").trim(),
+                        label = label,
+                        image = parseChoiceImage(o.opt("image")),
+                    )
                 }
                 if (parsed.isEmpty()) return null
                 ComponentNode.Choice(
@@ -206,6 +225,8 @@ fun parseComponentNode(raw: JSONObject?): ComponentNode? {
                     options = parsed,
                     multiple = raw.optBoolean("multiple", false),
                     action = parseComponentAction(raw.optJSONObject("action")),
+                    hint = raw.optString("hint").trim(),
+                    allowCustom = raw.optBoolean("allow_custom", false),
                 )
             }
 
@@ -256,6 +277,29 @@ private fun parseComponentChildren(array: JSONArray?): List<ComponentNode>? {
         }
     }
     return out
+}
+
+/**
+ * 选项缩略图解析：宽松接受 url 字符串或 `{url|delivery_id|upload_id}` 对象。
+ * 完全没有来源、或键类型不对时返回 null，让选项退化成纯文字行。
+ */
+private fun parseChoiceImage(raw: Any?): ChoiceImage? = when (raw) {
+    is JSONObject -> ChoiceImage(
+        url = raw.optString("url").trim(),
+        deliveryId = raw.optString("delivery_id").trim(),
+        uploadId = raw.optString("upload_id").trim(),
+    ).takeIf { it.url.isNotEmpty() || it.deliveryId.isNotEmpty() || it.uploadId.isNotEmpty() }
+
+    is String -> raw.trim().takeIf { it.isNotEmpty() }?.let { ChoiceImage(url = it) }
+    else -> null
+}
+
+/** 这条消息的组件树里是否包含选择节点（用于跳过态判定）。 */
+fun ComponentNode.containsChoice(): Boolean = when (this) {
+    is ComponentNode.Choice -> true
+    is ComponentNode.Card -> children.any { it.containsChoice() }
+    is ComponentNode.ListBlock -> items.any { it.containsChoice() }
+    else -> false
 }
 
 private fun parseComponentAction(raw: JSONObject?): ComponentAction? {
@@ -321,8 +365,16 @@ fun ComponentNode.toJson(): JSONObject = when (this) {
         if (name.isNotEmpty()) put("name", name)
         if (id.isNotEmpty()) put("id", id)
         if (multiple) put("multiple", true)
+        if (hint.isNotEmpty()) put("hint", hint)
+        if (allowCustom) put("allow_custom", true)
         put("options", JSONArray().apply {
-            options.forEach { put(JSONObject().put("id", it.id).put("label", it.label)) }
+            options.forEach { option ->
+                put(
+                    JSONObject().put("id", option.id).put("label", option.label).apply {
+                        option.image?.let { put("image", it.toJson()) }
+                    },
+                )
+            }
         })
         action?.let { put("action", it.toJson()) }
     }
@@ -348,6 +400,12 @@ fun ComponentNode.toJson(): JSONObject = when (this) {
     ComponentNode.Divider -> JSONObject().put("type", "divider")
 
     is ComponentNode.Unknown -> JSONObject().put("type", type)
+}
+
+private fun ChoiceImage.toJson(): JSONObject = JSONObject().apply {
+    if (url.isNotEmpty()) put("url", url)
+    if (deliveryId.isNotEmpty()) put("delivery_id", deliveryId)
+    if (uploadId.isNotEmpty()) put("upload_id", uploadId)
 }
 
 private fun ComponentAction.toJson(): JSONObject = JSONObject().put("type", type).put("name", name).apply {

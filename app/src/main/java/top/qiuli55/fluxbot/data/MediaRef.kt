@@ -136,3 +136,7 @@ fun ComponentNode.File.mediaRef(): MediaRef? =
 
 fun ComponentNode.Audio.mediaRef(): MediaRef? =
     mediaRefFor(url = url, deliveryId = deliveryId, uploadId = uploadId, index = index)
+
+/** 选择项缩略图没有 index，默认取 delivery 的第一张。 */
+fun ChoiceImage.mediaRef(): MediaRef? =
+    mediaRefFor(url = url, deliveryId = deliveryId, uploadId = uploadId)

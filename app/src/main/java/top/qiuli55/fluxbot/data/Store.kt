@@ -378,6 +378,56 @@ class Store(context: Context) {
         return m
     }
 
+    /**
+     * 记录选择卡片的作答结果。状态写进消息 payload，随会话一起持久化，
+     * 重新进入会话后仍能渲染成「已选 / 已跳过」，不会又变成可提交。
+     */
+    fun setChoiceState(
+        botId: String,
+        messageId: String,
+        state: String,
+        selection: List<String> = emptyList(),
+        custom: String = "",
+    ) = updateBot(botId) { bot ->
+        bot.copy(
+            messages = bot.messages.map { msg ->
+                if (msg.id != messageId) {
+                    msg
+                } else {
+                    msg.copy(
+                        payload = msg.payload + mapOf(
+                            "choice_state" to state,
+                            "choice_selection" to selection.joinToString(","),
+                            "choice_custom" to custom,
+                        ),
+                    )
+                }
+            },
+        )
+    }
+
+    /**
+     * 用户直接在输入框发消息时，把当前尚未作答的选择卡片标为跳过。
+     * 只处理最后一条用户消息之后、尚未记录状态的 choice 消息。
+     */
+    fun skipPendingChoices(botId: String, exceptId: String = "") = updateBot(botId) { bot ->
+        val lastUser = bot.messages.indexOfLast { it.role == "user" }
+        var changed = false
+        val messages = bot.messages.mapIndexed { index, msg ->
+            val pending = index > lastUser &&
+                msg.id != exceptId &&
+                msg.component?.containsChoice() == true &&
+                msg.payload["choice_state"].isNullOrEmpty()
+            if (pending) {
+                changed = true
+                msg.copy(payload = msg.payload + ("choice_state" to "skipped"))
+            } else {
+                msg
+            }
+        }
+        if (changed) bot.copy(messages = messages) else bot
+    }
+
     // ---------- 远端 Bot ----------
 
     fun mergeRemoteBots(remote: List<RemoteBot>) {

@@ -53,6 +53,33 @@ class PendingDecisionsTest {
     }
 
     @Test
+    fun parsesRealTimeoutForNormalAndSubtaskDecisions() {
+        val decision = pending("d-timeout")
+            .put("timeout_seconds", 300)
+            .put("expires_at", "2026-11-16T10:05:00+00:00")
+        val normal = parsePendingDecisionTasks(JSONArray().put(task("chat-task", decision))).single()
+        val subtask = parsePendingDecisionTasks(JSONArray().put(task("subtask-1", decision))).single()
+
+        assertEquals(300, normal.timeoutSeconds)
+        assertEquals("2026-11-16T10:05:00+00:00", normal.expiresAt)
+        assertEquals(normal.timeoutSeconds, subtask.timeoutSeconds)
+        assertEquals(normal.expiresAt, subtask.expiresAt)
+    }
+
+    @Test
+    fun oldBackendWithoutTimeoutStaysCompatible() {
+        val parsed = parsePendingDecisionTasks(
+            JSONArray().put(task("chat-task", pending("d-old"))),
+        ).single()
+
+        assertEquals(null, parsed.timeoutSeconds)
+        assertEquals("", parsed.expiresAt)
+        // 原有字段仍按老契约解析。
+        assertEquals("删除 victim-a？", parsed.question)
+        assertEquals("delete_data", parsed.kind)
+    }
+
+    @Test
     fun subtaskDecisionKeepsDetailAndMeta() {
         val decision = JSONObject()
             .put("id", "d-1")

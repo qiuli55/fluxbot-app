@@ -129,6 +129,9 @@ internal fun parsePendingDecision(taskId: String, o: JSONObject): PendingDecisio
         options = options,
         kind = o.optStringOrEmpty("kind"),
         meta = flattenPayload(o.optJSONObject("meta")),
+        // 旧后端没有这两个字段：保持 null，卡片就不显示时长，而不是继续写死 10 分钟。
+        timeoutSeconds = o.optInt("timeout_seconds", 0).takeIf { it > 0 },
+        expiresAt = o.optStringOrEmpty("expires_at"),
     )
 }
 
@@ -173,6 +176,10 @@ data class PendingDecision(
     val kind: String,
     /** 决策 meta：command / channel / draft_id / chat_id 等展示字段。 */
     val meta: Map<String, String> = emptyMap(),
+    /** 后端真实等待上限（秒）；旧后端缺省为 null。 */
+    val timeoutSeconds: Int? = null,
+    /** 审批截止时间（ISO 8601）；旧后端缺省为空。 */
+    val expiresAt: String = "",
 )
 
 /** 远端 Bot 的一条长期记忆。 */

@@ -121,6 +121,9 @@ fun ChatScreen(botId: String) {
     var typing by remember { mutableStateOf(false) }
     var workingBots by remember { mutableStateOf<List<Bot>>(emptyList()) }
     var pendingDecision by remember(botId) { mutableStateOf<PendingDecision?>(null) }
+    var decisionStatus by remember(botId) {
+        mutableStateOf<ApprovalCardStatus>(ApprovalCardStatus.Pending)
+    }
     var approving by remember(botId) { mutableStateOf(false) }
     var awaitingApproval by remember(botId) { mutableStateOf(false) }
     var activeTurnId by remember(botId) { mutableStateOf("") }
@@ -166,8 +169,34 @@ fun ChatScreen(botId: String) {
         if (!b.remote || b.group || b.id.isBlank()) return
         try {
             val list = store.api.listPendingDecisions(b.id, b.chatTaskId)
-            pendingDecision = list.firstOrNull()
-            if (list.isNotEmpty()) awaitingApproval = true
+            val first = list.firstOrNull()
+            val current = pendingDecision
+            if (first != null) {
+                val newDecision = current == null ||
+                    current.decisionId != first.decisionId ||
+                    decisionStatus is ApprovalCardStatus.Answered ||
+                    decisionStatus is ApprovalCardStatus.TimedOut
+                pendingDecision = first
+                if (newDecision) {
+                    decisionStatus = ApprovalCardStatus.Pending
+                } else if (decisionStatus !is ApprovalCardStatus.Submitting &&
+                    decisionStatus !is ApprovalCardStatus.Failed
+                ) {
+                    // 同一张卡继续等：保留待批准，只刷新后端带来的最新超时字段。
+                    decisionStatus = ApprovalCardStatus.Pending
+                }
+                awaitingApproval = true
+            } else {
+                if (current != null && decisionStatus !is ApprovalCardStatus.Submitting) {
+                    // 卡片还在等，但后端已不再列出：按超时自动拒绝处理；本地已答复的保持原样。
+                    if (decisionStatus is ApprovalCardStatus.Pending ||
+                        decisionStatus is ApprovalCardStatus.Failed
+                    ) {
+                        decisionStatus = ApprovalCardStatus.TimedOut
+                    }
+                }
+                awaitingApproval = false
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -282,18 +311,31 @@ fun ChatScreen(botId: String) {
     fun respondDecision(option: String) {
         val pending = pendingDecision ?: return
         if (approving) return
+        if (decisionStatus is ApprovalCardStatus.Answered ||
+            decisionStatus is ApprovalCardStatus.TimedOut
+        ) {
+            return
+        }
         approving = true
+        decisionStatus = ApprovalCardStatus.Submitting
         val turnId = activeTurnId
         ui.scope.launch {
             try {
                 store.api.chooseDecision(pending.taskId, pending.decisionId, option)
-                pendingDecision = null
+                // 保留卡片并进入已答复态：选中的行打勾，其余行不再可点。
+                pendingDecision = pending
+                decisionStatus = ApprovalCardStatus.Answered(
+                    chosen = option,
+                    allowed = option != "拒绝",
+                )
                 awaitingApproval = false
                 ui.haptic(8)
                 ui.showToast(if (option == "拒绝") "已拒绝" else "已允许")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                // 网络失败不能吞掉卡片：保持待批准，卡片内提示并允许重试。
+                decisionStatus = ApprovalCardStatus.Failed("提交失败，请重试")
                 ui.showToast(e.message ?: "操作失败")
                 return@launch
             } finally {
@@ -355,7 +397,8 @@ fun ChatScreen(botId: String) {
 
     val itemCount = 1 + messages.size +
         (if (typing) 1 else 0) +
-        (if (workingBots.isNotEmpty()) 1 else 0)
+        (if (workingBots.isNotEmpty()) 1 else 0) +
+        (if (pendingDecision != null) 1 else 0)
     LaunchedEffect(itemCount) {
         if (itemCount > 0) listState.scrollToItem(itemCount - 1)
     }
@@ -540,18 +583,29 @@ fun ChatScreen(botId: String) {
             if (workingBots.isNotEmpty()) {
                 item(key = "working") { GroupWorkingRow(workingBots) }
             }
+            // 审批卡跟在对话流末尾，按 Bot 气泡的左对齐与最大宽度展示，不再贴着输入栏。
+            pendingDecision?.let { pending ->
+                item(key = "approval-${pending.decisionId}") {
+                    BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        val cardMaxWidth = maxWidth * 0.79f
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Start,
+                        ) {
+                            ApprovalCard(
+                                decision = pending,
+                                status = decisionStatus,
+                                onChoose = { respondDecision(it) },
+                                modifier = Modifier.widthIn(max = cardMaxWidth),
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         Column(Modifier.fillMaxWidth()) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
-            pendingDecision?.let { pending ->
-                ApprovalCard(
-                    decision = pending,
-                    busy = approving,
-                    waiting = awaitingApproval,
-                    onChoose = { respondDecision(it) },
-                )
-            }
             ChatChips { submit(it) }
             ChatComposer(
                 hint = if (bot.group) "在群里发消息" else "发消息给 ${bot.name}",
@@ -1053,281 +1107,6 @@ private fun TypingRow(animated: Boolean = true) {
     }
 }
 
-/** 审批卡：工具 / 出站草稿 / 通用决策，只存在于界面上，不写入消息列表。 */
-@Composable
-internal fun ApprovalCard(
-    decision: PendingDecision,
-    busy: Boolean,
-    waiting: Boolean,
-    onChoose: (String) -> Unit,
-) {
-    val channel = decision.meta["channel"].orEmpty()
-    val tool = decision.meta["tool_name"].orEmpty()
-    when {
-        channel.isNotBlank() || decision.kind.endsWith("_outbound") ->
-            OutboundApprovalCard(decision, busy, waiting, onChoose)
-        tool.isNotBlank() || decision.kind in setOf(
-            "high_risk_command", "protected_access", "rule_match", "tool_permission_prompt",
-        ) -> ToolApprovalCard(decision, busy, waiting, onChoose)
-        else -> GenericApprovalCard(decision, busy, waiting, onChoose)
-    }
-}
-
-@Composable
-private fun ApprovalShell(
-    title: String,
-    badgeColor: Color,
-    note: String,
-    busy: Boolean,
-    waiting: Boolean,
-    options: List<String>,
-    onChoose: (String) -> Unit,
-    body: @Composable () -> Unit,
-) {
-    val shape = RoundedCornerShape(18.dp)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(start = 12.dp, end = 12.dp, top = 10.dp)
-            .clip(shape)
-            .background(Flux.panel2)
-            .border(1.dp, Flux.line, shape)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            Box(Modifier.size(7.dp).clip(CircleShape).background(badgeColor))
-            Text(
-                title,
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight(560),
-                color = Flux.text,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        body()
-        Text(
-            if (waiting) "等待你的批准 · $note" else note,
-            fontSize = 10.5.sp,
-            color = Flux.text4,
-            modifier = Modifier.padding(top = 8.dp),
-        )
-        val labels = options.ifEmpty { listOf("允许", "拒绝") }
-        Row(
-            Modifier.fillMaxWidth().padding(top = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            labels.forEach { label ->
-                val primary = label != "拒绝" && (label == "允许" || labels.size == 1)
-                ApprovalButton(
-                    label = label,
-                    primary = primary,
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                    onClick = { onChoose(label) },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ToolApprovalCard(
-    decision: PendingDecision,
-    busy: Boolean,
-    waiting: Boolean,
-    onChoose: (String) -> Unit,
-) {
-    val tool = decision.meta["tool_name"].orEmpty()
-    val command = decision.detail.lineSequence()
-        .firstOrNull { it.startsWith("命令：") }
-        ?.removePrefix("命令：")
-        ?.trim()
-        .orEmpty()
-    val risk = decision.detail.lineSequence()
-        .firstOrNull { it.startsWith("风险：") }
-        ?.removePrefix("风险：")
-        ?.trim()
-        .orEmpty()
-    val dir = decision.meta["working_dir"].orEmpty()
-    ApprovalShell(
-        title = decision.question.ifBlank {
-            if (tool.isBlank()) "需要你批准" else "Claude 请求使用 $tool"
-        },
-        badgeColor = Flux.warn,
-        note = "仅本次有效 · 10 分钟无响应自动拒绝",
-        busy = busy,
-        waiting = waiting,
-        options = decision.options,
-        onChoose = onChoose,
-    ) {
-        if (command.isNotBlank()) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 9.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF090B0D))
-                    .border(1.dp, Flux.lineSoft, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 11.dp, vertical = 9.dp),
-            ) {
-                Text(
-                    command,
-                    fontSize = 11.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = Color(0xFFCFE9DE),
-                    lineHeight = 17.sp,
-                    maxLines = 5,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (dir.isNotBlank()) {
-                    Text(
-                        dir,
-                        fontSize = 10.5.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = Flux.text4,
-                        modifier = Modifier.padding(top = 5.dp),
-                    )
-                }
-            }
-        } else if (decision.detail.isNotBlank()) {
-            Text(
-                decision.detail,
-                fontSize = 12.sp,
-                color = Flux.text3,
-                lineHeight = 18.sp,
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-        if (risk.isNotBlank()) {
-            Text(
-                "风险：$risk",
-                fontSize = 10.5.sp,
-                color = Flux.warn,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun OutboundApprovalCard(
-    decision: PendingDecision,
-    busy: Boolean,
-    waiting: Boolean,
-    onChoose: (String) -> Unit,
-) {
-    val channel = decision.meta["channel"].orEmpty()
-    val channelText = when (channel) {
-        "feishu" -> "飞书"
-        "wecom" -> "企业微信"
-        "dingtalk" -> "钉钉"
-        "email" -> "邮箱"
-        else -> channel.ifBlank { "频道" }
-    }
-    val chat = decision.meta["chat_id"].orEmpty()
-    val preview = decision.detail.lineSequence()
-        .filterNot { it.startsWith("准备发送到") || it.startsWith("触发规则：") }
-        .joinToString("\n")
-        .trim()
-    ApprovalShell(
-        title = listOfNotNull(
-            "发送到$channelText",
-            chat.takeIf { it.isNotBlank() },
-        ).joinToString(" · "),
-        badgeColor = Flux.accent,
-        note = "出站草稿 · 允许后只发送一次",
-        busy = busy,
-        waiting = waiting,
-        options = decision.options,
-        onChoose = onChoose,
-    ) {
-        if (preview.isNotBlank()) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 9.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Flux.panel3)
-                    .padding(horizontal = 11.dp, vertical = 9.dp),
-            ) {
-                Text(
-                    preview,
-                    fontSize = 12.sp,
-                    color = Flux.text2,
-                    lineHeight = 18.sp,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun GenericApprovalCard(
-    decision: PendingDecision,
-    busy: Boolean,
-    waiting: Boolean,
-    onChoose: (String) -> Unit,
-) {
-    ApprovalShell(
-        title = decision.question.ifBlank { "需要你批准" },
-        badgeColor = Flux.warn,
-        note = "仅本次有效",
-        busy = busy,
-        waiting = waiting,
-        options = decision.options,
-        onChoose = onChoose,
-    ) {
-        if (decision.detail.isNotBlank()) {
-            Text(
-                decision.detail,
-                fontSize = 12.sp,
-                color = Flux.text3,
-                lineHeight = 18.sp,
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun ApprovalButton(
-    label: String,
-    primary: Boolean,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    val shape = RoundedCornerShape(14.dp)
-    Box(
-        modifier
-            .height(38.dp)
-            .clip(shape)
-            .background(if (primary) Flux.accent else Flux.panel3)
-            .border(1.dp, if (primary) Flux.accent else Flux.line, shape)
-            .alpha(if (enabled) 1f else 0.4f)
-            .clickable(enabled = enabled) { onClick() },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            label,
-            fontSize = 13.sp,
-            fontWeight = FontWeight(560),
-            color = if (primary) Flux.ink else Flux.text,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
 
 /**
  * 仅用于 JVM 截图（Paparazzi）的聊天页快照。
@@ -1340,8 +1119,7 @@ internal fun ChatSnapshot(
     bot: Bot,
     messages: List<Message>,
     pending: PendingDecision? = null,
-    approving: Boolean = false,
-    waiting: Boolean = false,
+    pendingStatus: ApprovalCardStatus = ApprovalCardStatus.Pending,
     typing: Boolean = false,
     workingBots: List<Bot> = emptyList(),
     groupMembers: List<Bot> = emptyList(),
@@ -1408,18 +1186,28 @@ internal fun ChatSnapshot(
                     if (workingBots.isNotEmpty()) {
                         item(key = "working") { GroupWorkingRow(workingBots) }
                     }
+                    pending?.let { decision ->
+                        item(key = "approval-${decision.decisionId}") {
+                            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                                val cardMaxWidth = maxWidth * 0.79f
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Start,
+                                ) {
+                                    ApprovalCard(
+                                        decision = decision,
+                                        status = pendingStatus,
+                                        onChoose = onAction,
+                                        modifier = Modifier.widthIn(max = cardMaxWidth),
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Column(Modifier.fillMaxWidth()) {
                     Box(Modifier.fillMaxWidth().height(1.dp).background(Flux.lineSoft))
-                    pending?.let {
-                        ApprovalCard(
-                            decision = it,
-                            busy = approving,
-                            waiting = waiting,
-                            onChoose = onAction,
-                        )
-                    }
                     ChatChips(onPick = onAction)
                     ChatComposer(
                         hint = if (bot.group) "在群里发消息" else "发消息给 ${bot.name}",

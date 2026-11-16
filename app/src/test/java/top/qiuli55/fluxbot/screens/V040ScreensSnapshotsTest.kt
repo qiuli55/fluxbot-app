@@ -277,9 +277,9 @@ class V040ScreensSnapshotsTest {
                 options = listOf("允许", "拒绝"),
                 kind = "high_risk_command",
                 meta = mapOf("tool_name" to "Bash", "working_dir" to "/workspace/app"),
+                timeoutSeconds = 300,
             ),
-            busy = false,
-            waiting = false,
+            status = ApprovalCardStatus.Pending,
             onChoose = {},
         )
     }
@@ -295,9 +295,9 @@ class V040ScreensSnapshotsTest {
                 options = listOf("允许", "拒绝"),
                 kind = "outbound_approval",
                 meta = mapOf("channel" to "feishu", "chat_id" to "产品评审群"),
+                timeoutSeconds = 90,
             ),
-            busy = false,
-            waiting = false,
+            status = ApprovalCardStatus.Pending,
             onChoose = {},
         )
     }

@@ -26,6 +26,7 @@ import org.junit.Rule
 import org.junit.Test
 import top.qiuli55.fluxbot.R
 import top.qiuli55.fluxbot.data.PendingDecision
+import top.qiuli55.fluxbot.data.approvalPositionLabel
 import top.qiuli55.fluxbot.ui.Flux
 
 /**
@@ -64,6 +65,18 @@ class ApprovalCardSnapshotsTest {
         summary = "删除整个文件夹 e2e-victim-b",
         timeoutSeconds = 300,
         expiresAt = "2026-11-16T10:05:00+00:00",
+    )
+
+    /** 很长的绝对路径：收起时只留 3 行，点开后完整展示。 */
+    private val longPathDecision = deleteDecision.copy(
+        decisionId = "dec-long-path",
+        meta = mapOf(
+            "command" to "rm -rf /opt/projects/v05/mac-test/backend/data/attachments/2026/11/17/" +
+                "e2e-victim-b-long-directory-name/nested/deeper/subdir/" +
+                "another-very-long-segment-for-wrapping",
+            "tool_name" to "Bash",
+        ),
+        detail = "Bot 准备执行：rm -rf e2e-victim-b（删除目录）",
     )
 
     /** 旧后端：没有 summary，卡片必须回到按 kind 生成的旧标题。 */
@@ -252,6 +265,35 @@ class ApprovalCardSnapshotsTest {
         ApprovalCard(
             decision = legacyDecision,
             status = ApprovalCardStatus.Pending,
+            onChoose = {},
+        )
+    }
+
+    @Test
+    fun longCommandCollapsedToThreeLines() = page("40-approval-card-command-collapsed") {
+        ApprovalCard(
+            decision = longPathDecision,
+            status = ApprovalCardStatus.Pending,
+            onChoose = {},
+        )
+    }
+
+    @Test
+    fun longCommandExpandedShowsWholePath() = page("41-approval-card-command-expanded") {
+        ApprovalCard(
+            decision = longPathDecision,
+            status = ApprovalCardStatus.Pending,
+            initiallyExpanded = true,
+            onChoose = {},
+        )
+    }
+
+    @Test
+    fun positionLabelHiddenForSingleCard() = page("42-approval-card-single-no-position") {
+        ApprovalCard(
+            decision = deleteDecision,
+            status = ApprovalCardStatus.Pending,
+            positionLabel = approvalPositionLabel(0, 1),
             onChoose = {},
         )
     }

@@ -304,6 +304,13 @@ class ApprovalCardStateTest {
     }
 
     @Test
+    fun commandShowsThreeLinesWhenCollapsedAndAllLinesWhenExpanded() {
+        // 灰色命令小字：收起最多 3 行（超长路径省略），点开后不再限制行数。
+        assertEquals(3, approvalOperationMaxLines(expanded = false))
+        assertEquals(Int.MAX_VALUE, approvalOperationMaxLines(expanded = true))
+    }
+
+    @Test
     fun darkAndLightPalettesBothExistAndDiffer() {
         val dark = approvalCardColors(darkTheme = true)
         val light = approvalCardColors(darkTheme = false)

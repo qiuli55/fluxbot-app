@@ -35,6 +35,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -45,12 +47,14 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -60,6 +64,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -67,19 +72,29 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import top.qiuli55.fluxbot.data.ApprovalEvent
 import top.qiuli55.fluxbot.data.Bot
 import org.json.JSONObject
 import top.qiuli55.fluxbot.data.ComponentAction
 import top.qiuli55.fluxbot.data.Message
 import top.qiuli55.fluxbot.data.PendingDecision
 import top.qiuli55.fluxbot.data.RemoteMessage
+import top.qiuli55.fluxbot.data.approvalEventDecisions
+import top.qiuli55.fluxbot.data.approvalPositionLabel
+import top.qiuli55.fluxbot.data.firstShownApprovalLog
 import top.qiuli55.fluxbot.data.listRoutineDetails
+import top.qiuli55.fluxbot.data.mergePendingDecisions
 import top.qiuli55.fluxbot.data.routineTriggerSummary
+import top.qiuli55.fluxbot.data.stablePendingPage
 import top.qiuli55.fluxbot.data.updateRoutineDetail
 import top.qiuli55.fluxbot.nav.LocalStore
 import top.qiuli55.fluxbot.nav.LocalUi
@@ -96,6 +111,7 @@ import java.util.UUID
 private val CHIPS = listOf("总结未读消息", "安排今天", "查一下资料", "写一条周报")
 private val DockBg = Color(0xFF0D1013)
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(botId: String) {
     val store = LocalStore.current
@@ -120,18 +136,39 @@ fun ChatScreen(botId: String) {
     var input by remember { mutableStateOf("") }
     var typing by remember { mutableStateOf(false) }
     var workingBots by remember { mutableStateOf<List<Bot>>(emptyList()) }
-    var pendingDecision by remember(botId) { mutableStateOf<PendingDecision?>(null) }
-    var decisionStatus by remember(botId) {
-        mutableStateOf<ApprovalCardStatus>(ApprovalCardStatus.Pending)
+    // 待决策可以同时有多张（主任务 + 子任务，或一条任务上先后挂出的多张卡）：
+    // 用列表 + 横滑轮播展示，每张卡有自己的提交状态。
+    var pendingDecisions by remember(botId) { mutableStateOf<List<PendingDecision>>(emptyList()) }
+    var cardStatuses by remember(botId) {
+        mutableStateOf<Map<String, ApprovalCardStatus>>(emptyMap())
     }
+    var approvalAnchorId by remember(botId) { mutableStateOf<String?>(null) }
     var approving by remember(botId) { mutableStateOf(false) }
     var awaitingApproval by remember(botId) { mutableStateOf(false) }
     var activeTurnId by remember(botId) { mutableStateOf("") }
     var turnInFlight by remember(botId) { mutableStateOf(false) }
+    var resumed by remember(botId) { mutableStateOf(true) }
+    // 只用于「卡片首次出现」日志：同一决策只记一次。
+    val shownDecisions = remember(botId) { mutableSetOf<String>() }
+    val pagerState = rememberPagerState(pageCount = { pendingDecisions.size })
     val listState = rememberLazyListState()
     val context = LocalContext.current
 
     LaunchedEffect(messages.size) { store.markRead(botId) }
+
+    // 前后台切换：暂停时停掉审批轮询与事件流，回到前台立刻恢复。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, botId) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> resumed = true
+                Lifecycle.Event.ON_PAUSE -> resumed = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     /**
      * 子任务在聊天轮次结束后才收尾：把终态消息补进本地列表。
@@ -163,52 +200,142 @@ fun ChatScreen(botId: String) {
         }
     }
 
-    // 远端 Bot：可见期间持续轮询待批准决策；离开页面后自动取消。
-    suspend fun pollPendingDecisions() {
-        val b = store.bot(botId) ?: return
-        if (!b.remote || b.group || b.id.isBlank()) return
-        try {
-            val list = store.api.listPendingDecisions(b.id, b.chatTaskId)
-            val first = list.firstOrNull()
-            val current = pendingDecision
-            if (first != null) {
-                val newDecision = current == null ||
-                    current.decisionId != first.decisionId ||
-                    decisionStatus is ApprovalCardStatus.Answered ||
-                    decisionStatus is ApprovalCardStatus.TimedOut
-                pendingDecision = first
-                if (newDecision) {
-                    decisionStatus = ApprovalCardStatus.Pending
-                } else if (decisionStatus !is ApprovalCardStatus.Submitting &&
-                    decisionStatus !is ApprovalCardStatus.Failed
-                ) {
-                    // 同一张卡继续等：保留待批准，只刷新后端带来的最新超时字段。
-                    decisionStatus = ApprovalCardStatus.Pending
-                }
-                awaitingApproval = true
-            } else {
-                if (current != null && decisionStatus !is ApprovalCardStatus.Submitting) {
-                    // 卡片还在等，但后端已不再列出：按超时自动拒绝处理；本地已答复的保持原样。
-                    if (decisionStatus is ApprovalCardStatus.Pending ||
-                        decisionStatus is ApprovalCardStatus.Failed
-                    ) {
-                        decisionStatus = ApprovalCardStatus.TimedOut
-                    }
-                }
-                awaitingApproval = false
+    fun cardStatus(decisionId: String): ApprovalCardStatus =
+        cardStatuses[decisionId] ?: ApprovalCardStatus.Pending
+
+    fun setCardStatus(decisionId: String, status: ApprovalCardStatus) {
+        cardStatuses = cardStatuses + (decisionId to status)
+    }
+
+    /**
+     * 把一次拿到的列表落到界面：按 decisionId 去重、按发起时间从旧到新，
+     * 并给首次出现的卡片记一条日志（decision / 来源 / 从发起到显示的延迟）。
+     *
+     * [mergeWithCurrent] = true 用于「新卡到达」的事件（不能因为这一帧没带别的卡
+     * 就把它们删掉）；轮询与 ready 快照是权威列表，用 false 整体替换。
+     */
+    fun applyPendingDecisions(
+        incoming: List<PendingDecision>,
+        source: String,
+        mergeWithCurrent: Boolean,
+    ) {
+        val merged = if (mergeWithCurrent) {
+            mergePendingDecisions(listOf(pendingDecisions, incoming))
+        } else {
+            mergePendingDecisions(listOf(incoming))
+        }
+        val now = System.currentTimeMillis()
+        merged.forEach { decision ->
+            if (shownDecisions.add(decision.decisionId)) {
+                store.api.logDebug(firstShownApprovalLog(decision, source, now))
             }
+        }
+        pendingDecisions = merged
+        cardStatuses = cardStatuses.filterKeys { key -> merged.any { it.decisionId == key } }
+        awaitingApproval = merged.isNotEmpty()
+    }
+
+    /**
+     * 拉一次待批准决策；成功返回 true。失败只记日志（由调用方退避重试），
+     * 不打断正在进行的聊天。
+     */
+    suspend fun pollPendingDecisions(source: String = "poll"): Boolean {
+        val b = store.bot(botId) ?: return false
+        if (!b.remote || b.group || b.id.isBlank()) return false
+        return try {
+            val list = store.api.listPendingDecisions(b.id, b.chatTaskId)
+            applyPendingDecisions(list, source, mergeWithCurrent = false)
+            true
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // 轮询失败保持安静，不打断正在进行的聊天。
+            store.api.logDebug(
+                "approval.poll.failed source=$source error=${e.message.orEmpty()}",
+            )
+            false
         }
     }
 
-    LaunchedEffect(botId, bot.remote) {
-        if (!bot.remote || bot.group) return@LaunchedEffect
+    // 列表变化时把当前页锚定在用户正在看的那张卡：新卡插到前面不跳页；
+    // 当前卡被解决后顺延到顶上来的下一张。
+    LaunchedEffect(pendingDecisions) {
+        if (pendingDecisions.isEmpty()) {
+            approvalAnchorId = null
+            return@LaunchedEffect
+        }
+        val target = stablePendingPage(
+            pendingDecisions,
+            approvalAnchorId,
+            pagerState.currentPage,
+        )
+        if (target != pagerState.currentPage) pagerState.scrollToPage(target)
+        approvalAnchorId = pendingDecisions.getOrNull(target)?.decisionId
+    }
+
+    // 用户手动滑动后更新锚点，下一次列表更新不会把页面拉回旧卡。
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.currentPage }.collect { page ->
+            pendingDecisions.getOrNull(page)?.let { approvalAnchorId = it.decisionId }
+        }
+    }
+
+    // 审批兜底轮询（事件流之外的第二条腿）：可见且期间有活动时 3 秒一次，
+    // 空闲时降到 8 秒；连续失败按 6/12/24/30 秒退避，暂停 / 离开页面即停。
+    LaunchedEffect(botId, bot.remote, resumed) {
+        if (!bot.remote || bot.group || !resumed) return@LaunchedEffect
+        var failures = 0
         while (true) {
-            pollPendingDecisions()
-            delay(2000)
+            val ok = pollPendingDecisions()
+            failures = if (ok) 0 else (failures + 1).coerceAtMost(4)
+            val active = pendingDecisions.isNotEmpty() || awaitingApproval || typing ||
+                turnInFlight || activeTurnId.isNotBlank()
+            val waitMs = when {
+                !ok -> minOf(3_000L shl failures, 30_000L)
+                active -> 3_000L
+                else -> 8_000L
+            }
+            delay(waitMs)
+        }
+    }
+
+    /** 处理一帧审批事件；状态改动统一切回主线程。 */
+    suspend fun handleApprovalEvent(event: ApprovalEvent) {
+        when (event.type) {
+            "ready" -> applyPendingDecisions(
+                approvalEventDecisions(event),
+                "sse.ready",
+                mergeWithCurrent = false,
+            )
+            "approval.raised" -> applyPendingDecisions(
+                approvalEventDecisions(event),
+                "sse.raised",
+                mergeWithCurrent = true,
+            )
+            "approval.resolved" -> pollPendingDecisions("sse.resolved")
+            else -> Unit
+        }
+    }
+
+    // 实时通道：后端有审批事件就推，卡片不用等下一次轮询；断线（含部署重启）
+    // 后退避重连，轮询继续兜底，两者互为备份。
+    LaunchedEffect(botId, bot.remote, resumed) {
+        if (!bot.remote || bot.group || !resumed) return@LaunchedEffect
+        var failures = 0
+        while (true) {
+            try {
+                store.api.streamApprovalEvents(bot.id) { event ->
+                    withContext(Dispatchers.Main) { handleApprovalEvent(event) }
+                    if (event.type == "ready") failures = 0
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                store.api.logDebug(
+                    "approval.sse.disconnected error=${e.message.orEmpty()}",
+                )
+            }
+            failures = (failures + 1).coerceAtMost(5)
+            delay(minOf(2_000L shl failures, 30_000L))
         }
     }
 
@@ -272,7 +399,7 @@ fun ChatScreen(botId: String) {
                 if (status == "waiting_for_user_decision" || status == "waiting_for_approval") {
                     typing = false
                     awaitingApproval = true
-                    ui.scope.launch { pollPendingDecisions() }
+                    ui.scope.launch { pollPendingDecisions("turn.waiting") }
                 }
             }
             activeTurnId = ""
@@ -292,8 +419,7 @@ fun ChatScreen(botId: String) {
                 emptyList()
             }
             if (stillPending.isNotEmpty()) {
-                pendingDecision = stillPending.first()
-                awaitingApproval = true
+                applyPendingDecisions(stillPending, "turn.timeout", mergeWithCurrent = false)
                 typing = false
                 return
             }
@@ -308,40 +434,37 @@ fun ChatScreen(botId: String) {
         }
     }
 
-    fun respondDecision(option: String) {
-        val pending = pendingDecision ?: return
+    fun respondDecision(decision: PendingDecision, option: String) {
         if (approving) return
-        if (decisionStatus is ApprovalCardStatus.Answered ||
-            decisionStatus is ApprovalCardStatus.TimedOut
-        ) {
+        val current = cardStatus(decision.decisionId)
+        if (current is ApprovalCardStatus.Answered || current is ApprovalCardStatus.TimedOut) {
             return
         }
         approving = true
-        decisionStatus = ApprovalCardStatus.Submitting
+        setCardStatus(decision.decisionId, ApprovalCardStatus.Submitting)
         val turnId = activeTurnId
         ui.scope.launch {
             try {
-                store.api.chooseDecision(pending.taskId, pending.decisionId, option)
-                // 保留卡片并进入已答复态：选中的行打勾，其余行不再可点。
-                pendingDecision = pending
-                decisionStatus = ApprovalCardStatus.Answered(
-                    chosen = option,
-                    allowed = option != "拒绝",
-                )
-                awaitingApproval = false
+                store.api.chooseDecision(decision.taskId, decision.decisionId, option)
+                // 已解决：这张卡立刻收走，轮播顺延到下一张仍待批准的卡。
+                pendingDecisions = pendingDecisions.filterNot {
+                    it.decisionId == decision.decisionId
+                }
+                cardStatuses = cardStatuses - decision.decisionId
+                awaitingApproval = pendingDecisions.isNotEmpty()
                 ui.haptic(8)
                 ui.showToast(if (option == "拒绝") "已拒绝" else "已允许")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // 网络失败不能吞掉卡片：保持待批准，卡片内提示并允许重试。
-                decisionStatus = ApprovalCardStatus.Failed("提交失败，请重试")
+                // 网络失败不能吞掉卡片：保持这张卡，卡片内提示并允许重试。
+                setCardStatus(decision.decisionId, ApprovalCardStatus.Failed("提交失败，请重试"))
                 ui.showToast(e.message ?: "操作失败")
                 return@launch
             } finally {
                 approving = false
             }
-            pollPendingDecisions()
+            pollPendingDecisions("decision.answered")
             if (turnId.isNotBlank() && activeTurnId == turnId && !turnInFlight) waitTurn(turnId)
         }
     }
@@ -359,7 +482,14 @@ fun ChatScreen(botId: String) {
             }
             action.type == "server" && action.decisionId.isNotBlank() -> {
                 val option = action.option.ifBlank { "允许" }
-                respondDecision(option)
+                val target = pendingDecisions.firstOrNull {
+                    it.decisionId == action.decisionId
+                } ?: pendingDecisions.firstOrNull()
+                if (target == null) {
+                    ui.showToast("这张卡已处理")
+                } else {
+                    respondDecision(target, option)
+                }
             }
             action.type == "server" -> {
                 ui.showToast("已提交：${action.name}")
@@ -398,7 +528,7 @@ fun ChatScreen(botId: String) {
     val itemCount = 1 + messages.size +
         (if (typing) 1 else 0) +
         (if (workingBots.isNotEmpty()) 1 else 0) +
-        (if (pendingDecision != null) 1 else 0)
+        (if (pendingDecisions.isNotEmpty()) 1 else 0)
     LaunchedEffect(itemCount) {
         if (itemCount > 0) listState.scrollToItem(itemCount - 1)
     }
@@ -584,20 +714,33 @@ fun ChatScreen(botId: String) {
                 item(key = "working") { GroupWorkingRow(workingBots) }
             }
             // 审批卡跟在对话流末尾，按 Bot 气泡的左对齐与最大宽度展示，不再贴着输入栏。
-            pendingDecision?.let { pending ->
-                item(key = "approval-${pending.decisionId}") {
+            // 多张待决策时只占同一个位置：左右滑动切换，卡片上标 1/N。
+            if (pendingDecisions.isNotEmpty()) {
+                item(key = "approval-pager") {
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
                         val cardMaxWidth = maxWidth * 0.79f
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.Start,
                         ) {
-                            ApprovalCard(
-                                decision = pending,
-                                status = decisionStatus,
-                                onChoose = { respondDecision(it) },
+                            HorizontalPager(
+                                state = pagerState,
                                 modifier = Modifier.widthIn(max = cardMaxWidth),
-                            )
+                            ) { page ->
+                                val decision = pendingDecisions.getOrNull(page)
+                                if (decision != null) {
+                                    ApprovalCard(
+                                        decision = decision,
+                                        status = cardStatus(decision.decisionId),
+                                        positionLabel = approvalPositionLabel(
+                                            page,
+                                            pendingDecisions.size,
+                                        ),
+                                        onChoose = { respondDecision(decision, it) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -1114,12 +1257,19 @@ private fun TypingRow(animated: Boolean = true) {
  * 复用真实 ChatHead / MessageRow / TypingRow / GroupWorkingRow / ApprovalCard /
  * 快捷 chips / 输入栏，但不读取 LocalStore、不轮询远端决策、不发网络请求。
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun ChatSnapshot(
     bot: Bot,
     messages: List<Message>,
     pending: PendingDecision? = null,
     pendingStatus: ApprovalCardStatus = ApprovalCardStatus.Pending,
+    /** 多卡轮播截图：除 [pending] 之外的其余待决策。 */
+    additionalPending: List<PendingDecision> = emptyList(),
+    /** 多卡轮播截图：初始停在第几页（0 起）。 */
+    initialApprovalPage: Int = 0,
+    /** 截图用：命令区是否展开。 */
+    approvalExpanded: Boolean = false,
     typing: Boolean = false,
     workingBots: List<Bot> = emptyList(),
     groupMembers: List<Bot> = emptyList(),
@@ -1128,6 +1278,13 @@ internal fun ChatSnapshot(
     onAction: (String) -> Unit = {},
     onComponentAction: (ComponentAction) -> Unit = {},
 ) {
+    val snapshotDecisions = remember(pending, additionalPending) {
+        mergePendingDecisions(listOf(listOfNotNull(pending) + additionalPending))
+    }
+    val snapshotPager = rememberPagerState(
+        initialPage = initialApprovalPage.coerceAtLeast(0),
+        pageCount = { snapshotDecisions.size },
+    )
     FluxTheme {
         val inheritedStyle = LocalTextStyle.current
         CompositionLocalProvider(
@@ -1186,20 +1343,37 @@ internal fun ChatSnapshot(
                     if (workingBots.isNotEmpty()) {
                         item(key = "working") { GroupWorkingRow(workingBots) }
                     }
-                    pending?.let { decision ->
-                        item(key = "approval-${decision.decisionId}") {
+                    if (snapshotDecisions.isNotEmpty()) {
+                        item(key = "approval-pager") {
                             BoxWithConstraints(Modifier.fillMaxWidth()) {
                                 val cardMaxWidth = maxWidth * 0.79f
                                 Row(
                                     Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.Start,
                                 ) {
-                                    ApprovalCard(
-                                        decision = decision,
-                                        status = pendingStatus,
-                                        onChoose = onAction,
+                                    HorizontalPager(
+                                        state = snapshotPager,
                                         modifier = Modifier.widthIn(max = cardMaxWidth),
-                                    )
+                                    ) { page ->
+                                        val decision = snapshotDecisions.getOrNull(page)
+                                        if (decision != null) {
+                                            ApprovalCard(
+                                                decision = decision,
+                                                status = if (page == 0) {
+                                                    pendingStatus
+                                                } else {
+                                                    ApprovalCardStatus.Pending
+                                                },
+                                                positionLabel = approvalPositionLabel(
+                                                    page,
+                                                    snapshotDecisions.size,
+                                                ),
+                                                initiallyExpanded = approvalExpanded,
+                                                onChoose = onAction,
+                                                modifier = Modifier.fillMaxWidth(),
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

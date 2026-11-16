@@ -17,6 +17,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,6 +63,10 @@ internal data class ApprovalCardUi(
     val chosenLabel: String?,
     val error: String?,
 )
+
+/** 灰色小字命令的显示行数：收起最多 3 行（超出省略），点开后不限。 */
+internal fun approvalOperationMaxLines(expanded: Boolean): Int =
+    if (expanded) Int.MAX_VALUE else 3
 
 /** 由审批 kind 决定标题；未知 kind 回落到「需要你确认」。 */
 internal fun approvalTitle(kind: String, meta: Map<String, String>): String = when (kind) {
@@ -307,11 +315,19 @@ internal fun ApprovalCard(
     modifier: Modifier = Modifier,
     status: ApprovalCardStatus = ApprovalCardStatus.Pending,
     colors: ApprovalCardColors? = null,
+    /** 多张卡轮播时的位置文案（如「1/3」）；只有一张时传 null。 */
+    positionLabel: String? = null,
+    /** 截图用：命令区初始是否展开；生产路径总是先收起 3 行。 */
+    initiallyExpanded: Boolean = false,
 ) {
     val ui = approvalCardUi(decision, status)
     val palette = colors
         ?: approvalCardColors(MaterialTheme.colorScheme.background.luminance() < 0.5f)
     val shape = RoundedCornerShape(16.dp)
+    // 每张卡各自记住展开状态：横滑到别的卡再回来，保持用户上次的选择。
+    var operationExpanded by remember(decision.decisionId) {
+        mutableStateOf(initiallyExpanded)
+    }
     Column(
         modifier
             .fillMaxWidth()
@@ -325,14 +341,26 @@ internal fun ApprovalCard(
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
             // 大白话摘要就是卡片头条：亮色、16sp、半粗，一眼先看到「批什么」。
-            Text(
-                ui.title,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = if (ui.muted) palette.titleMuted else palette.title,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
+            // 右上角是「1/N」位置文案，只有多张卡时才出现。
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                Text(
+                    ui.title,
+                    modifier = Modifier.weight(1f),
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (ui.muted) palette.titleMuted else palette.title,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (!positionLabel.isNullOrBlank()) {
+                    Text(
+                        positionLabel,
+                        fontSize = 10.5.sp,
+                        color = if (ui.muted) palette.footerMuted else palette.footer,
+                        modifier = Modifier.padding(start = 8.dp, top = 3.dp),
+                    )
+                }
+            }
             if (ui.summaryReason.isNotBlank()) {
                 // 审批原因用警示琥珀色，提示风险但不当作红色告警。
                 Text(
@@ -345,16 +373,23 @@ internal fun ApprovalCard(
                 )
             }
             if (ui.operation.isNotBlank()) {
-                // 原始命令只留一行小灰字，完整内容仍可从后端的 detail 里溯源。
+                // 原始命令：小灰等宽字，收起时最多 3 行；点一下展开全文，再点收回。
                 Text(
                     ui.operation,
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                     lineHeight = 16.sp,
                     color = if (ui.muted) palette.commandMuted else palette.command,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 4.dp),
+                    maxLines = approvalOperationMaxLines(operationExpanded),
+                    overflow = if (operationExpanded) {
+                        TextOverflow.Clip
+                    } else {
+                        TextOverflow.Ellipsis
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp)
+                        .clickable { operationExpanded = !operationExpanded },
                 )
             }
         }

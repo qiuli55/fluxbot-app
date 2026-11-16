@@ -1,11 +1,13 @@
 package top.qiuli55.fluxbot.screens
 
+import androidx.compose.ui.graphics.luminance
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import top.qiuli55.fluxbot.data.PendingDecision
+import top.qiuli55.fluxbot.ui.Flux
 
 /** 审批卡纯状态映射：标题、操作行、字母徽标、超时文案与可点性。 */
 class ApprovalCardStateTest {
@@ -308,5 +310,26 @@ class ApprovalCardStateTest {
         assertEquals(darkApprovalCardColors, dark)
         assertEquals(lightApprovalCardColors(), light)
         assertTrue(dark.background != light.background)
+    }
+
+    @Test
+    fun darkPaletteMakesHeadlinePrimaryAndCommandTertiary() {
+        val dark = approvalCardColors(darkTheme = true)
+        // 标题是主文字色，原因用警示琥珀，命令退到三级灰。
+        assertEquals(Flux.text, dark.title)
+        assertEquals(Flux.warn, dark.reason)
+        assertEquals(Flux.text3, dark.command)
+        assertTrue(dark.title.luminance() > dark.command.luminance())
+        assertTrue(dark.title.luminance() > dark.reason.luminance())
+    }
+
+    @Test
+    fun lightPaletteKeepsTheSameHierarchy() {
+        val light = approvalCardColors(darkTheme = false)
+        // 浅色卡面：标题最深，原因带琥珀倾向，命令是中灰。
+        assertTrue(light.title.luminance() < light.command.luminance())
+        assertTrue(light.reason != light.title)
+        assertTrue(light.reason != light.command)
+        assertEquals(light.reason, lightApprovalCardColors().reason)
     }
 }

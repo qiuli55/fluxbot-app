@@ -240,7 +240,7 @@ class ApprovalCardSnapshotsTest {
     fun abnormalPaymentSummaryWithReason() = withSummary(
         name = "38-approval-card-summary-abnormal-payment",
         summary = "付款 350 元给 张三",
-        summaryReason = "陌生收款方、10 分钟内第 3 次付款",
+        summaryReason = "陌生收款方",
         kind = "payment_abnormal",
         command = "request_payment_approval amount=350 payee=张三",
         detail = "Bot 准备执行：request_payment_approval amount=350 payee=张三",

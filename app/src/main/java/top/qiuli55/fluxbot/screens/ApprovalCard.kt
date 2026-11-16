@@ -221,6 +221,8 @@ internal data class ApprovalCardColors(
     val dividerMuted: Color,
     val title: Color,
     val titleMuted: Color,
+    val reason: Color,
+    val reasonMuted: Color,
     val command: Color,
     val commandMuted: Color,
     val option: Color,
@@ -235,7 +237,7 @@ internal data class ApprovalCardColors(
     val error: Color,
 )
 
-/** 暗色卡面：比聊天背景略亮一层的 panel2/panel3，细边框，文字收敛到 text/text2/text3。 */
+/** 暗色卡面：比聊天背景略亮一层的 panel2/panel3，细边框；标题用 text，原因用 warn，命令用 text3。 */
 internal val darkApprovalCardColors = ApprovalCardColors(
     background = Flux.panel2,
     backgroundMuted = Flux.panel,
@@ -243,10 +245,12 @@ internal val darkApprovalCardColors = ApprovalCardColors(
     borderMuted = Flux.lineSoft,
     divider = Flux.line,
     dividerMuted = Flux.lineSoft,
-    title = Flux.text2,
-    titleMuted = Flux.text4,
-    command = Flux.text,
-    commandMuted = Flux.text3,
+    title = Flux.text,
+    titleMuted = Flux.text2,
+    reason = Flux.warn,
+    reasonMuted = Flux.text3,
+    command = Flux.text3,
+    commandMuted = Flux.text4,
     option = Flux.text,
     optionMuted = Flux.text4,
     badgeBackground = Flux.panel3,
@@ -267,10 +271,12 @@ internal fun lightApprovalCardColors() = ApprovalCardColors(
     borderMuted = Color(0xFFE9ECEA),
     divider = Color(0xFFE2E6E4),
     dividerMuted = Color(0xFFE9ECEA),
-    title = Color(0xFF6D7773),
-    titleMuted = Color(0xFF9AA29F),
-    command = Color(0xFF3C4642),
-    commandMuted = Color(0xFF8A928F),
+    title = Color(0xFF1B2320),
+    titleMuted = Color(0xFF6D7773),
+    reason = Color(0xFF9A6A14),
+    reasonMuted = Color(0xFF9AA29F),
+    command = Color(0xFF7A8380),
+    commandMuted = Color(0xFF9AA29F),
     option = Color(0xFF1B2320),
     optionMuted = Color(0xFF8B938F),
     badgeBackground = Color(0xFFEAEEEC),
@@ -288,7 +294,7 @@ internal fun approvalCardColors(darkTheme: Boolean): ApprovalCardColors =
     if (darkTheme) darkApprovalCardColors else lightApprovalCardColors()
 
 /**
- * Grok Bot 风格问题卡：圆角卡面、灰色标题、单色操作行、字母徽标。
+ * Grok Bot 风格问题卡：圆角卡面、亮色大白话标题、灰色小字命令、单色操作行、字母徽标。
  *
  * 配色默认跟随当前主题背景亮度：暗色 App 用 Flux 令牌（panel2/panel3 + 细边框），
  * 将来上线浅色主题时自动切到近白卡面。只负责展示与点击回调，网络请求仍在
@@ -318,35 +324,37 @@ internal fun ApprovalCard(
             ),
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            // 大白话摘要就是卡片头条：亮色、16sp、半粗，一眼先看到「批什么」。
             Text(
                 ui.title,
-                fontSize = 12.sp,
-                fontWeight = FontWeight(500),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
                 color = if (ui.muted) palette.titleMuted else palette.title,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
             if (ui.summaryReason.isNotBlank()) {
+                // 审批原因用警示琥珀色，提示风险但不当作红色告警。
                 Text(
                     ui.summaryReason,
-                    fontSize = 11.sp,
-                    color = if (ui.muted) palette.titleMuted else palette.title,
-                    maxLines = 2,
+                    fontSize = 13.sp,
+                    color = if (ui.muted) palette.reasonMuted else palette.reason,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 2.dp),
+                    modifier = Modifier.padding(top = 3.dp),
                 )
             }
             if (ui.operation.isNotBlank()) {
                 // 原始命令只留一行小灰字，完整内容仍可从后端的 detail 里溯源。
                 Text(
                     ui.operation,
-                    fontSize = 11.5.sp,
+                    fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
-                    lineHeight = 17.sp,
+                    lineHeight = 16.sp,
                     color = if (ui.muted) palette.commandMuted else palette.command,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 5.dp),
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
         }

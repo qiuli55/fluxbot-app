@@ -129,6 +129,9 @@ internal fun parsePendingDecision(taskId: String, o: JSONObject): PendingDecisio
         options = options,
         kind = o.optStringOrEmpty("kind"),
         meta = flattenPayload(o.optJSONObject("meta")),
+        // 旧后端没有摘要字段：保持空串，卡片回落到按 kind 生成的旧标题。
+        summary = o.optStringOrEmpty("summary"),
+        summaryReason = o.optStringOrEmpty("summary_reason"),
         // 旧后端没有这两个字段：保持 null，卡片就不显示时长，而不是继续写死 10 分钟。
         timeoutSeconds = o.optInt("timeout_seconds", 0).takeIf { it > 0 },
         expiresAt = o.optStringOrEmpty("expires_at"),
@@ -176,6 +179,10 @@ data class PendingDecision(
     val kind: String,
     /** 决策 meta：command / channel / draft_id / chat_id 等展示字段。 */
     val meta: Map<String, String> = emptyMap(),
+    /** 后端下发的大白话标题（如「付款 350 元给 张三」）；旧后端为空串。 */
+    val summary: String = "",
+    /** 异常支付的一行原因（如「陌生收款方」）；没有则为空串。 */
+    val summaryReason: String = "",
     /** 后端真实等待上限（秒）；旧后端缺省为 null。 */
     val timeoutSeconds: Int? = null,
     /** 审批截止时间（ISO 8601）；旧后端缺省为空。 */

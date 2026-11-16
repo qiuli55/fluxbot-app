@@ -61,8 +61,16 @@ class ApprovalCardSnapshotsTest {
         options = listOf("允许", "拒绝"),
         kind = "delete_data",
         meta = mapOf("command" to "rm -rf e2e-victim-b", "tool_name" to "Bash"),
+        summary = "删除整个文件夹 e2e-victim-b",
         timeoutSeconds = 300,
         expiresAt = "2026-11-16T10:05:00+00:00",
+    )
+
+    /** 旧后端：没有 summary，卡片必须回到按 kind 生成的旧标题。 */
+    private val legacyDecision = deleteDecision.copy(
+        decisionId = "dec-legacy",
+        summary = "",
+        summaryReason = "",
     )
 
     private fun page(
@@ -170,6 +178,80 @@ class ApprovalCardSnapshotsTest {
         ApprovalCard(
             decision = deleteDecision,
             status = ApprovalCardStatus.Failed("提交失败，请重试"),
+            onChoose = {},
+        )
+    }
+
+    private fun withSummary(
+        name: String,
+        summary: String,
+        summaryReason: String = "",
+        kind: String = "delete_data",
+        command: String = "rm -rf e2e-victim-b",
+        detail: String = "Bot 准备执行：$command（删除目录）",
+        meta: Map<String, String> = mapOf("command" to command, "tool_name" to "Bash"),
+    ): Unit = page(name) {
+        ApprovalCard(
+            decision = deleteDecision.copy(
+                kind = kind,
+                summary = summary,
+                summaryReason = summaryReason,
+                detail = detail,
+                meta = meta,
+            ),
+            status = ApprovalCardStatus.Pending,
+            onChoose = {},
+        )
+    }
+
+    @Test
+    fun paymentSummary() = withSummary(
+        name = "34-approval-card-summary-payment",
+        summary = "付款 350 元给 张三",
+        kind = "payment_amount",
+        command = "request_payment_approval amount=350 payee=张三",
+        detail = "Bot 准备执行：request_payment_approval amount=350 payee=张三",
+        meta = mapOf("tool_name" to "request_payment_approval"),
+    )
+
+    @Test
+    fun deleteFileSummary() = withSummary(
+        name = "35-approval-card-summary-delete-file",
+        summary = "删除文件 report.pdf",
+        command = "rm report.pdf",
+    )
+
+    @Test
+    fun deleteFolderSummary() = withSummary(
+        name = "36-approval-card-summary-delete-folder",
+        summary = "删除整个文件夹 /opt/data",
+        command = "rm -rf /opt/data",
+    )
+
+    @Test
+    fun deleteBotSummary() = withSummary(
+        name = "37-approval-card-summary-delete-bot",
+        summary = "删除 Bot 小助手",
+        command = "bot.delete bot_id=abc",
+        meta = mapOf("tool_name" to "bot.delete"),
+    )
+
+    @Test
+    fun abnormalPaymentSummaryWithReason() = withSummary(
+        name = "38-approval-card-summary-abnormal-payment",
+        summary = "付款 350 元给 张三",
+        summaryReason = "陌生收款方、10 分钟内第 3 次付款",
+        kind = "payment_abnormal",
+        command = "request_payment_approval amount=350 payee=张三",
+        detail = "Bot 准备执行：request_payment_approval amount=350 payee=张三",
+        meta = mapOf("tool_name" to "request_payment_approval"),
+    )
+
+    @Test
+    fun legacyFallbackSummary() = page("39-approval-card-summary-fallback") {
+        ApprovalCard(
+            decision = legacyDecision,
+            status = ApprovalCardStatus.Pending,
             onChoose = {},
         )
     }

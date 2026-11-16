@@ -15,6 +15,8 @@ class ApprovalCardStateTest {
         detail: String = "",
         options: List<String> = listOf("允许", "拒绝"),
         meta: Map<String, String> = emptyMap(),
+        summary: String = "",
+        summaryReason: String = "",
         timeoutSeconds: Int? = 300,
     ) = PendingDecision(
         taskId = "task-1",
@@ -24,6 +26,8 @@ class ApprovalCardStateTest {
         options = options,
         kind = kind,
         meta = meta,
+        summary = summary,
+        summaryReason = summaryReason,
         timeoutSeconds = timeoutSeconds,
     )
 
@@ -121,6 +125,60 @@ class ApprovalCardStateTest {
             "发送消息需要你确认",
             approvalTitle("feishu_outbound", mapOf("channel" to "feishu")),
         )
+    }
+
+    // ---------- 大白话摘要 ----------
+
+    @Test
+    fun summaryBecomesCardTitle() {
+        val ui = approvalCardUi(
+            decision(kind = "delete_data", summary = " 删除整个文件夹 /opt/data "),
+            ApprovalCardStatus.Pending,
+        )
+        assertEquals("删除整个文件夹 /opt/data", ui.title)
+        // 原始命令仍在下面一行小灰字里。
+        assertEquals("", ui.operation)
+    }
+
+    @Test
+    fun missingSummaryFallsBackToKindTitle() {
+        val ui = approvalCardUi(
+            decision(kind = "payment_amount", summary = ""),
+            ApprovalCardStatus.Pending,
+        )
+        assertEquals("大额付款需要你确认", ui.title)
+    }
+
+    @Test
+    fun blankSummaryAlsoFallsBackToKindTitle() {
+        val ui = approvalCardUi(
+            decision(kind = "rule_match", summary = "   "),
+            ApprovalCardStatus.Pending,
+        )
+        assertEquals("用户规则需要你确认", ui.title)
+    }
+
+    @Test
+    fun abnormalPaymentReasonIsShownBelowTitle() {
+        val ui = approvalCardUi(
+            decision(
+                kind = "payment_abnormal",
+                summary = "付款 350 元给 张三",
+                summaryReason = "陌生收款方、10 分钟内第 3 次付款",
+            ),
+            ApprovalCardStatus.Pending,
+        )
+        assertEquals("付款 350 元给 张三", ui.title)
+        assertEquals("陌生收款方、10 分钟内第 3 次付款", ui.summaryReason)
+    }
+
+    @Test
+    fun summaryReasonIsTrimmed() {
+        val ui = approvalCardUi(
+            decision(summary = "付款 20 美元给 Acme", summaryReason = "  陌生收款方  "),
+            ApprovalCardStatus.Pending,
+        )
+        assertEquals("陌生收款方", ui.summaryReason)
     }
 
     // ---------- 时长 ----------

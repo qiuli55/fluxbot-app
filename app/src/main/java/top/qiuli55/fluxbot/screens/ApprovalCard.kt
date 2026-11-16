@@ -50,6 +50,7 @@ internal data class ApprovalOptionUi(val letter: String, val label: String)
 /** 审批卡纯展示模型；不依赖 Compose，可直接做 JVM 单元测试。 */
 internal data class ApprovalCardUi(
     val title: String,
+    val summaryReason: String,
     val operation: String,
     val options: List<ApprovalOptionUi>,
     val footer: String,
@@ -194,7 +195,9 @@ internal fun approvalCardUi(
     }
     val muted = status is ApprovalCardStatus.Answered || status is ApprovalCardStatus.TimedOut
     return ApprovalCardUi(
-        title = approvalTitle(decision.kind, decision.meta),
+        // 后端摘要优先：一句话说清批什么；旧后端没有摘要时回落到 kind 标题。
+        title = decision.summary.trim().ifEmpty { approvalTitle(decision.kind, decision.meta) },
+        summaryReason = decision.summaryReason.trim(),
         operation = approvalOperation(decision),
         options = options,
         footer = approvalFooter(status, decision.timeoutSeconds),
@@ -323,14 +326,25 @@ internal fun ApprovalCard(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (ui.summaryReason.isNotBlank()) {
+                Text(
+                    ui.summaryReason,
+                    fontSize = 11.sp,
+                    color = if (ui.muted) palette.titleMuted else palette.title,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
             if (ui.operation.isNotBlank()) {
+                // 原始命令只留一行小灰字，完整内容仍可从后端的 detail 里溯源。
                 Text(
                     ui.operation,
                     fontSize = 11.5.sp,
                     fontFamily = FontFamily.Monospace,
                     lineHeight = 17.sp,
                     color = if (ui.muted) palette.commandMuted else palette.command,
-                    maxLines = 3,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 5.dp),
                 )

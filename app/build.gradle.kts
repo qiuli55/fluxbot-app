@@ -13,8 +13,8 @@ android {
         applicationId = "top.qiuli55.fluxbot"
         minSdk = 26
         targetSdk = 34
-        versionCode = 35
-        versionName = "0.5.0-beta.3"
+        versionCode = 36
+        versionName = "0.5.0-beta.4"
 
     }
 

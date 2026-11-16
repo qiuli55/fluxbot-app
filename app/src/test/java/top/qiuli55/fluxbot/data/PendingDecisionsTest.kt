@@ -80,6 +80,30 @@ class PendingDecisionsTest {
     }
 
     @Test
+    fun parsesPlainSummaryAndAbnormalReasonForNormalAndSubtask() {
+        val decision = pending("d-summary", kind = "payment_abnormal")
+            .put("summary", "付款 350 元给 张三")
+            .put("summary_reason", "陌生收款方、10 分钟内第 3 次付款")
+        val normal = parsePendingDecisionTasks(JSONArray().put(task("chat-task", decision))).single()
+        val subtask = parsePendingDecisionTasks(JSONArray().put(task("subtask-1", decision))).single()
+
+        assertEquals("付款 350 元给 张三", normal.summary)
+        assertEquals("陌生收款方、10 分钟内第 3 次付款", normal.summaryReason)
+        assertEquals(normal.summary, subtask.summary)
+        assertEquals(normal.summaryReason, subtask.summaryReason)
+    }
+
+    @Test
+    fun oldBackendWithoutSummaryLeavesItEmptyForFallbackTitle() {
+        val parsed = parsePendingDecisionTasks(
+            JSONArray().put(task("chat-task", pending("d-old-summary"))),
+        ).single()
+
+        assertEquals("", parsed.summary)
+        assertEquals("", parsed.summaryReason)
+    }
+
+    @Test
     fun subtaskDecisionKeepsDetailAndMeta() {
         val decision = JSONObject()
             .put("id", "d-1")

@@ -31,6 +31,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
+import top.qiuli55.fluxbot.BuildConfig
 import top.qiuli55.fluxbot.data.Account
 import top.qiuli55.fluxbot.data.RemoteBrowserStatus
 import top.qiuli55.fluxbot.data.RemoteChannelStatus
@@ -325,7 +326,7 @@ fun SettingsScreen() {
             }
 
             Text(
-                "Flux Bot 0.4.0-beta.2 · 可交互演示\n账号由 flux.qiuli55.top 账号云统一管理",
+                "Flux Bot ${BuildConfig.VERSION_NAME} · 可交互演示\n账号由 flux.qiuli55.top 账号云统一管理",
                 fontSize = 11.sp,
                 color = Flux.text4,
                 lineHeight = 18.7.sp,

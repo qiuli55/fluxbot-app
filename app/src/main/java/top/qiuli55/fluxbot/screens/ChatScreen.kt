@@ -267,7 +267,8 @@ fun ChatScreen(botId: String) {
         }
     }
 
-    LaunchedEffect(messages.size) { store.markRead(botId) }
+    // 内容有变化（含子任务卡更新）就清未读；预览也要跟着最新一条走。
+    LaunchedEffect(messages) { store.markRead(botId) }
 
     // 远端 Bot：可见期间持续轮询待批准决策；离开页面后自动取消。
     suspend fun pollPendingDecisions() {

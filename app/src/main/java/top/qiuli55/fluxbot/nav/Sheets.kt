@@ -78,6 +78,9 @@ import top.qiuli55.fluxbot.data.ModelCatalog
 import top.qiuli55.fluxbot.data.RemoteConnector
 import top.qiuli55.fluxbot.data.RemoteRoutineDetail
 import top.qiuli55.fluxbot.data.RemoteVaultLogin
+import top.qiuli55.fluxbot.data.ROUTINE_NOTIFY_NONE
+import top.qiuli55.fluxbot.data.ROUTINE_NOTIFY_ORIGIN
+import top.qiuli55.fluxbot.data.routineNotifyLabel
 import top.qiuli55.fluxbot.data.VaultSecrets
 import top.qiuli55.fluxbot.data.appendJournal
 import top.qiuli55.fluxbot.data.createSkill
@@ -1660,6 +1663,7 @@ private fun RoutineAddSheet(botId: String) {
     var title by remember { mutableStateOf("") }
     var time by remember { mutableStateOf("08:30") }
     var freqIndex by remember { mutableStateOf(0) }
+    var notify by remember { mutableStateOf(ROUTINE_NOTIFY_ORIGIN) }
     val freqs = listOf("每天", "工作日", "每周一")
     SheetFrame("新建定时任务") {
         FieldLabel("任务名称")
@@ -1668,6 +1672,12 @@ private fun RoutineAddSheet(botId: String) {
         FluxInput(time, { time = it }, placeholder = "08:30", center = true)
         FieldLabel("重复")
         SegTabs(freqs, freqIndex, { freqIndex = it })
+        FieldLabel("结果发到哪里")
+        SegTabs(
+            listOf("发回原处", "不发"),
+            if (notify == ROUTINE_NOTIFY_NONE) 1 else 0,
+            { index -> notify = if (index == 0) ROUTINE_NOTIFY_ORIGIN else ROUTINE_NOTIFY_NONE },
+        )
         SheetHint("到点自动开工。Bot 忙的时候会排队，不会打断正在跑的任务。")
         Spacer(Modifier.height(16.dp))
         PrimaryButton("创建定时任务", enabled = title.isNotBlank()) {
@@ -1690,6 +1700,7 @@ private fun RoutineAddSheet(botId: String) {
                             instruction = name,
                             schedule = cron,
                             enabled = true,
+                            notify = notify,
                         )
                         store.refreshBotRoutines(bot.id)
                         ui.closeSheet()
@@ -1797,6 +1808,7 @@ private fun RoutineDetailForm(
     }
     var mode by remember(routine.id) { mutableIntStateOf(routineMode(routine)) }
     var events by remember(routine.id) { mutableStateOf(routine.eventTriggers.toSet()) }
+    var notify by remember(routine.id) { mutableStateOf(routine.notify) }
     var busy by remember(routine.id) { mutableStateOf(false) }
     val modes = listOf("定时", "Webhook", "GitHub", "邮件")
 
@@ -1849,9 +1861,17 @@ private fun RoutineDetailForm(
     FieldLabel("要做什么")
     FluxTextArea(instruction, { instruction = it }, placeholder = "到这个点时让 Bot 做什么")
 
+    FieldLabel("结果发到哪里")
+    SegTabs(
+        listOf("发回原处", "不发"),
+        if (notify == ROUTINE_NOTIFY_NONE) 1 else 0,
+        { index -> notify = if (index == 0) ROUTINE_NOTIFY_ORIGIN else ROUTINE_NOTIFY_NONE },
+    )
+
     Spacer(Modifier.height(12.dp))
     DetailLine("下次运行", routine.nextRunAt.ifBlank { "未排期" })
     DetailLine("上次运行", routine.lastRunAt.ifBlank { "还没有运行记录" })
+    DetailLine("结果通知", routineNotifyLabel(routine.notify))
     DetailLine("来源", "Bot 在对话里创建 · ${routine.createdAt.ifBlank { "时间未知" }}")
     SheetHint("服务器暂未记录「来源对话」与每次运行结果，这里只展示最近一次运行时间。")
 
@@ -1880,6 +1900,7 @@ private fun RoutineDetailForm(
                     schedule = if (mode == 0) cron else null,
                     clearSchedule = mode != 0,
                     eventTriggers = finalEvents.toList(),
+                    notify = notify,
                 )
                 store.refreshBotRoutines(botId)
                 ui.showToast("例程已保存")

@@ -45,8 +45,10 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -68,11 +70,33 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import top.qiuli55.fluxbot.data.ApiException
 import top.qiuli55.fluxbot.data.Bot
+import top.qiuli55.fluxbot.data.CONVERSATION_STREAM_EVENT
+import top.qiuli55.fluxbot.data.ChatStreamState
+import top.qiuli55.fluxbot.data.HttpStream
+import top.qiuli55.fluxbot.data.STREAMING_MESSAGE_ID
+import top.qiuli55.fluxbot.data.SseDecoder
+import top.qiuli55.fluxbot.data.TURN_STREAM_EVENT
+import top.qiuli55.fluxbot.data.TaskStreamEvent
+import top.qiuli55.fluxbot.data.appendLocalMessage
+import top.qiuli55.fluxbot.data.applyConversationEvent
+import top.qiuli55.fluxbot.data.beginLocalTurn
+import top.qiuli55.fluxbot.data.createChatStreamState
+import top.qiuli55.fluxbot.data.parseTaskStreamEvent
+import top.qiuli55.fluxbot.data.reconcileHistory
+import top.qiuli55.fluxbot.data.removeMessage
+import top.qiuli55.fluxbot.data.setConversationMessages
+import top.qiuli55.fluxbot.data.streamingText
+import top.qiuli55.fluxbot.data.toAppMessage
+import top.qiuli55.fluxbot.data.toRemoteMessage
 import org.json.JSONObject
 import top.qiuli55.fluxbot.data.ComponentAction
 import top.qiuli55.fluxbot.data.ComponentNode
@@ -92,6 +116,9 @@ import top.qiuli55.fluxbot.ui.IconBtn
 import top.qiuli55.fluxbot.ui.PageHead
 import top.qiuli55.fluxbot.ui.Pill
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 private val CHIPS = listOf("总结未读消息", "安排今天", "查一下资料", "写一条周报")
 private val DockBg = Color(0xFF0D1013)
@@ -128,6 +155,118 @@ fun ChatScreen(botId: String) {
     val listState = rememberLazyListState()
     val context = LocalContext.current
 
+    val remoteChat = bot.remote && !bot.group && bot.id.isNotBlank()
+
+    /**
+     * 事件流的纯状态：负责 seq 去重、增量拼接、子任务归并。
+     * 渲染仍以 Store 为准，流事件在这里算完后按需写回 Store。
+     */
+    var streamState by remember(botId) {
+        mutableStateOf(
+            createChatStreamState(
+                store.bot(botId)?.messages?.map { it.toRemoteMessage() }.orEmpty(),
+            ),
+        )
+    }
+    /** 已应用的最大 seq；重连时作为 after_seq。网络线程只读，主线程推进。 */
+    val seenSeq = remember(botId) { AtomicLong(0L) }
+    /** 每次发消息后 +1，让对话流立即重连（新建对话任务后不用等退避）。 */
+    var streamKick by remember(botId) { mutableIntStateOf(0) }
+    /** 兜底回复的 turnId -> 本地消息 id：流里的最终消息到达时替换掉，避免重复正文。 */
+    val fallbackReplies = remember(botId) { mutableMapOf<String, String>() }
+    val turnStreamHandles = remember(botId) { ConcurrentHashMap.newKeySet<HttpStream>() }
+    val turnStreamScope = rememberCoroutineScope()
+
+    DisposableEffect(botId) {
+        onDispose {
+            turnStreamHandles.toList().forEach { runCatching { it.close() } }
+            turnStreamHandles.clear()
+        }
+    }
+
+    /** 把本次事件真正改变的消息写回 Store；每段增量不落盘，最终消息才持久化。 */
+    fun syncStreamMessages(previous: ChatStreamState, next: ChatStreamState) {
+        val before = previous.messages.associateBy { it.id }
+        next.messages.forEach { message ->
+            if (message.id == STREAMING_MESSAGE_ID) return@forEach
+            if (before[message.id] != message) store.upsertStreamMessage(botId, message)
+        }
+    }
+
+    /** 流里的最终消息到达时，撤掉之前补的兜底回复（按 turn_id 或同内容匹配）。 */
+    fun dropFallbackReply(event: TaskStreamEvent) {
+        if (event.type != "assistant_message" || fallbackReplies.isEmpty()) return
+        val turnId = event.data.optString("turn_id")
+        val incoming = event.data.optJSONObject("message")
+            ?.optString("content")?.trim().orEmpty()
+        val match = fallbackReplies.entries.firstOrNull { (id, messageId) ->
+            (turnId.isNotEmpty() && id == turnId) ||
+                (
+                    incoming.isNotEmpty() &&
+                        store.bot(botId)?.messages
+                            ?.firstOrNull { it.id == messageId }
+                            ?.displayText()?.trim() == incoming
+                    )
+        } ?: return
+        fallbackReplies.remove(match.key)
+        streamState = removeMessage(streamState, match.value)
+        store.removeMessage(botId, match.value)
+    }
+
+    /** 在主线程应用一条事件；seq 已在网络线程推进过时这里会直接忽略重放。 */
+    fun handleStreamData(raw: String) {
+        val event = parseTaskStreamEvent(raw) ?: return
+        if (event.seq <= seenSeq.get()) return
+        seenSeq.set(event.seq)
+        dropFallbackReply(event)
+        val previous = streamState
+        val next = applyConversationEvent(previous, event)
+        if (next === previous) return
+        streamState = next
+        // 增量只更新界面上的流式气泡；其它事件（最终消息 / 用户消息 / 子任务）才写回 Store。
+        if (event.type != "assistant_delta" && event.type != "assistant_start" &&
+            event.type != "assistant_error"
+        ) {
+            syncStreamMessages(previous, next)
+        }
+    }
+
+    /** 本机刚发起的回合再单独订阅一次：对话流暂不可用时仍能实时看到回复。 */
+    fun watchTurnStream(turnId: String) {
+        turnStreamScope.launch {
+            var handle: HttpStream? = null
+            try {
+                withContext(Dispatchers.IO) {
+                    handle = store.api.turnStream(botId, turnId, seenSeq.get())
+                        .also { turnStreamHandles.add(it) }
+                    val decoder = SseDecoder()
+                    val reader = handle!!.body.bufferedReader(Charsets.UTF_8)
+                    val buffer = CharArray(4_096)
+                    while (isActive) {
+                        val read = reader.read(buffer)
+                        if (read < 0) break
+                        for (frame in decoder.push(String(buffer, 0, read))) {
+                            if (frame.event.isNullOrEmpty() || frame.event == TURN_STREAM_EVENT) {
+                                withContext(Dispatchers.Main.immediate) {
+                                    handleStreamData(frame.data)
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 对话流是主通道；单轮流连不上时保持安静。
+            } finally {
+                handle?.let {
+                    turnStreamHandles.remove(it)
+                    runCatching { it.close() }
+                }
+            }
+        }
+    }
+
     LaunchedEffect(messages.size) { store.markRead(botId) }
 
     // 远端 Bot：可见期间持续轮询待批准决策；离开页面后自动取消。
@@ -150,6 +289,73 @@ fun ChatScreen(botId: String) {
         while (true) {
             pollPendingDecisions()
             delay(2000)
+        }
+    }
+
+    /**
+     * 整段对话的实时流：只要聊天页可见就一直保持，回合结束后不关闭
+     * （后台子任务与例程结果随后才回来）。发消息时通过 [streamKick] 立即重连。
+     */
+    LaunchedEffect(botId, remoteChat, streamKick) {
+        if (!remoteChat) return@LaunchedEffect
+        val open = AtomicReference<HttpStream?>(null)
+        val worker = launch(Dispatchers.IO) {
+            var backoff = 800L
+            while (isActive) {
+                try {
+                    val handle = store.api.conversationStream(botId, seenSeq.get())
+                    open.set(handle)
+                    turnStreamHandles.add(handle)
+                    // 连上就重置退避；没有对话任务时服务端会立刻发一个空流结束，稍后重试。
+                    backoff = 800L
+                    val decoder = SseDecoder()
+                    val reader = handle.body.bufferedReader(Charsets.UTF_8)
+                    val buffer = CharArray(4_096)
+                    while (isActive) {
+                        val read = reader.read(buffer)
+                        if (read < 0) break
+                        for (frame in decoder.push(String(buffer, 0, read))) {
+                            if (frame.event.isNullOrEmpty() ||
+                                frame.event == CONVERSATION_STREAM_EVENT
+                            ) {
+                                withContext(Dispatchers.Main.immediate) {
+                                    handleStreamData(frame.data)
+                                }
+                            }
+                        }
+                    }
+                    val tail = decoder.flush()
+                    if (tail != null &&
+                        (tail.event.isNullOrEmpty() || tail.event == CONVERSATION_STREAM_EVENT)
+                    ) {
+                        withContext(Dispatchers.Main.immediate) { handleStreamData(tail.data) }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (!isActive) break
+                    // 登录态已失效：交给全局过期回调，别在这里无限重试。
+                    if (e is ApiException && e.status == 401) break
+                } finally {
+                    open.getAndSet(null)?.let {
+                        turnStreamHandles.remove(it)
+                        runCatching { it.close() }
+                    }
+                }
+                if (!isActive) break
+                delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(5_000)
+            }
+        }
+        try {
+            worker.join()
+        } finally {
+            // 离开页面 / 切换 Bot：断开长连接，阻塞中的读会立即返回。
+            open.getAndSet(null)?.let {
+                turnStreamHandles.remove(it)
+                runCatching { it.close() }
+            }
+            worker.cancel()
         }
     }
 
@@ -193,6 +399,20 @@ fun ChatScreen(botId: String) {
         }
     }
 
+    /**
+     * 提交兜底回复：事件流没送到最终消息时，至少让用户看到这一轮的回复。
+     *
+     * 用 `reply-<turnId>` 作 id 并记进 [fallbackReplies]；如果流里的
+     * assistant_message 稍后到达，会被就地替换掉而不是再追加一遍。
+     */
+    fun addFallbackReply(turnId: String, text: String) {
+        val id = "reply-$turnId"
+        if (store.bot(botId)?.messages?.any { it.id == id } == true) return
+        fallbackReplies[turnId] = id
+        val message = store.addMessage(botId, "bot", text, id = id)
+        streamState = appendLocalMessage(streamState, message.toRemoteMessage())
+    }
+
     // 等这一轮结束；若超时但服务端仍在等用户批准，保留卡片而不是报硬失败。
     suspend fun waitTurn(turnId: String) {
         val b = store.bot(botId) ?: return
@@ -210,7 +430,24 @@ fun ChatScreen(botId: String) {
             activeTurnId = ""
             awaitingApproval = false
             typing = false
-            store.addMessage(botId, "bot", turn.replyText.ifBlank { "模型没有返回内容" })
+            val reply = turn.replyText
+            if (reply.isNotBlank()) {
+                // 内容以事件流为准：先等它一拍，避免和流里的 assistant_message 重复。
+                var rendered = streamState.messages.any {
+                    it.role == "assistant" && it.content.trim() == reply.trim()
+                }
+                var waited = 0
+                while (!rendered && waited < 2_000) {
+                    delay(150)
+                    waited += 150
+                    rendered = streamState.messages.any {
+                        it.role == "assistant" && it.content.trim() == reply.trim()
+                    }
+                }
+                if (!rendered) addFallbackReply(turnId, reply)
+            } else {
+                addFallbackReply(turnId, "模型没有返回内容")
+            }
             store.markRead(botId)
             pollPendingDecisions()
         } catch (e: CancellationException) {
@@ -286,10 +523,10 @@ fun ChatScreen(botId: String) {
         }
     }
 
-    // 远端 Bot：首次进入时拉取这个会话的历史消息。
+    // 远端 Bot：进入会话时拉取历史（服务端是真相源；同一子任务的多条状态在这里已归并）。
     LaunchedEffect(botId) {
         val b = store.bot(botId) ?: return@LaunchedEffect
-        if (!b.remote || b.group || b.id.isBlank() || b.messages.isNotEmpty()) return@LaunchedEffect
+        if (!b.remote || b.group || b.id.isBlank()) return@LaunchedEffect
         val list = try {
             store.api.conversation(b.id)
         } catch (e: CancellationException) {
@@ -298,24 +535,32 @@ fun ChatScreen(botId: String) {
             emptyList()
         }
         if (list.isEmpty()) return@LaunchedEffect
+        streamState = setConversationMessages(streamState, list)
         val now = store.clock()
-        val history = list.mapIndexed { i, remote ->
-            Message(
-                id = "h-$botId-$i",
-                role = if (remote.role == "assistant") "bot" else "user",
-                text = remote.displayText(),
-                time = now,
-                component = remote.component,
-                kind = remote.kind,
-                fallbackText = remote.fallbackText,
-                payload = remote.payload,
-            )
-        }
-        store.replaceMessages(botId, history)
+        // 历史 id 用服务端 id：事件流重放时据此去重；本机作答状态与例程卡片保留。
+        val fresh = list.map { it.toAppMessage(now) }
+        store.replaceMessages(botId, reconcileHistory(fresh, store.bot(botId)?.messages.orEmpty()))
     }
 
-    val itemCount = 1 + messages.size +
-        (if (typing) 1 else 0) +
+    // 流式气泡单独叠加在持久化消息之后，避免每个增量都写一次磁盘。
+    val liveAssistantText = streamingText(streamState)
+    val displayMessages = remember(messages, liveAssistantText) {
+        if (liveAssistantText.isEmpty()) {
+            messages
+        } else {
+            messages + Message(
+                id = STREAMING_MESSAGE_ID,
+                role = "bot",
+                text = liveAssistantText,
+                time = store.clock(),
+                kind = "text",
+            )
+        }
+    }
+    val showTyping = typing && liveAssistantText.isEmpty()
+
+    val itemCount = 1 + displayMessages.size +
+        (if (showTyping) 1 else 0) +
         (if (workingBots.isNotEmpty()) 1 else 0)
     LaunchedEffect(itemCount) {
         if (itemCount > 0) listState.scrollToItem(itemCount - 1)
@@ -327,7 +572,10 @@ fun ChatScreen(botId: String) {
         // 用户在输入框直接发言：此前还没作答的选择卡视为跳过，之后不可再提交。
         store.skipPendingChoices(botId)
         input = ""
-        store.addMessage(botId, "user", text)
+        // 乐观消息用 local- 前缀：服务端回显同内容时事件流会就地替换它。
+        val localId = "local-${UUID.randomUUID()}"
+        val localMessage = store.addMessage(botId, "user", text, id = localId)
+        streamState = appendLocalMessage(streamState, localMessage.toRemoteMessage())
         store.setWorking(botId, true)
 
         // 远端 Bot 的单聊走异步会话接口：发起一轮 → 长轮询到结束。
@@ -349,6 +597,11 @@ fun ChatScreen(botId: String) {
                     }
                     activeTurnId = started.id
                     awaitingApproval = false
+                    // 本机回合：清掉旧气泡，允许接收这一轮的增量。
+                    streamState = beginLocalTurn(streamState, started.id)
+                    // 首条消息会创建对话任务：立即重连对话流，不必等退避。
+                    streamKick++
+                    watchTurnStream(started.id)
                     // 回合刚开始就立即查一次，别让批准卡片等下一个 2 秒轮询。
                     pollPendingDecisions()
                     waitTurn(started.id)
@@ -511,8 +764,8 @@ fun ChatScreen(botId: String) {
                     )
                 }
             }
-            val lastUserIndex = messages.indexOfLast { it.role == "user" }
-            itemsIndexed(messages, key = { _, msg -> msg.id }) { index, msg ->
+            val lastUserIndex = displayMessages.indexOfLast { it.role == "user" }
+            itemsIndexed(displayMessages, key = { _, msg -> msg.id }) { index, msg ->
                 MessageRow(
                     msg = msg,
                     senderBot = groupMembers.firstOrNull { it.name == msg.sender },
@@ -527,7 +780,7 @@ fun ChatScreen(botId: String) {
                     onPauseRoutine = ::pauseRoutine,
                 )
             }
-            if (typing) {
+            if (showTyping) {
                 item(key = "typing") { TypingRow() }
             }
             if (workingBots.isNotEmpty()) {
@@ -852,7 +1105,9 @@ internal fun InlineEventCard(
                     "running", "executing", "queued", "pending", "waiting_for_user_decision",
                 )
                 val title = msg.payload["title"].orEmpty().ifBlank { msg.displayText() }
-                val summary = msg.payload["summary"].orEmpty()
+                // 事件里的 data.message 优先，其次历史字段 summary / result。
+                val summary = msg.payload["message"].orEmpty()
+                    .ifBlank { msg.payload["summary"].orEmpty() }
                     .ifBlank { msg.payload["result"].orEmpty() }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(

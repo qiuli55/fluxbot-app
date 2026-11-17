@@ -51,6 +51,8 @@ data class RemoteMessage(
     val createdAt: String = "",
     /** 服务端 payload 的扁平化副本（子任务状态 / 决策结果等内联卡片用）。 */
     val payload: Map<String, String> = emptyMap(),
+    /** 服务端消息 id；历史与事件流共用，用它去重 / 续传。 */
+    val id: String = "",
 ) {
     fun displayText(): String = content.ifBlank { fallbackText }
 }
@@ -81,6 +83,7 @@ internal fun parseRemoteMessage(o: JSONObject): RemoteMessage? {
         fallbackText = envelope?.fallbackText.orEmpty(),
         createdAt = o.optStringOrEmpty("created_at"),
         payload = flattenPayload(payload),
+        id = o.optStringOrEmpty("id"),
     )
 }
 
@@ -140,6 +143,8 @@ data class RemoteRoutine(
     val time: String,
     val freq: String,
     val enabled: Boolean,
+    /** 结果通知策略：origin = 发回原处（默认），none = 不发。 */
+    val notify: String = "origin",
 )
 
 /** 一次任务的运行记录（用于 Bot 页的运行历史）。 */
@@ -220,6 +225,8 @@ class Api internal constructor(
     private val secure: SecretStore,
     private val cloud: CloudAuthManager? = null,
     private val logger: (String) -> Unit = {},
+    /** 长连接（SSE）用的流式传输；普通请求仍走 [HttpTransport]。 */
+    private val streamTransport: StreamingHttpTransport = UrlConnectionStreamingHttpTransport(),
 ) {
 
     /** 生产入口：普通设置走 SharedPreferences，令牌走 Keystore 加密的 SecureStore。 */
@@ -657,11 +664,81 @@ class Api internal constructor(
             val data = request("GET", "/api/v1/bots/$botId/conversation?limit=$limit", null)
                 .optJSONObject("data") ?: JSONObject()
             val messages = data.optJSONArray("messages") ?: JSONArray()
-            (0 until messages.length()).mapNotNull { index ->
+            val parsed = (0 until messages.length()).mapNotNull { index ->
                 val o = messages.optJSONObject(index) ?: return@mapNotNull null
                 parseRemoteMessage(o)
             }
+            // 历史里同一子任务会有开始 / 完成等多条状态消息：进入会话时先归并成一张卡。
+            mergeSubtaskMessages(parsed)
         }
+
+    // ---------- 对话事件流（SSE） ----------
+
+    /**
+     * 整段对话的实时事件流，回合结束后仍保持连接（后台子任务、例程结果随后才回来）。
+     *
+     * 用 Bearer 鉴权（云账号令牌优先，否则设备令牌），与普通请求共用
+     * `X-Flux-Account` 和 401 刷新重试一次的逻辑；不使用网页端的 Cookie / EventSource。
+     */
+    suspend fun conversationStream(botId: String, afterSeq: Long): HttpStream =
+        withContext(Dispatchers.IO) {
+            openEventStream(
+                "/api/v1/bots/$botId/conversation/stream?after_seq=${afterSeq.coerceAtLeast(0)}",
+            )
+        }
+
+    /** 单轮对话的实时事件流；对话流暂时不可用时作为兜底。 */
+    suspend fun turnStream(botId: String, turnId: String, afterSeq: Long): HttpStream =
+        withContext(Dispatchers.IO) {
+            openEventStream(
+                "/api/v1/bots/$botId/turns/$turnId/stream?after_seq=${afterSeq.coerceAtLeast(0)}",
+            )
+        }
+
+    private suspend fun openEventStream(path: String): HttpStream {
+        val cloudToken = if (useCloudAuth) cloud?.accessTokenForRequest() else null
+        if (useCloudAuth && cloudToken == null) {
+            throw ApiException("登录已过期，请重新登录", 401, "cloud_expired")
+        }
+        return try {
+            openEventStreamOnce(path, cloudToken ?: token)
+        } catch (e: ApiException) {
+            if (e.status == 401 && cloudToken != null && cloud != null) {
+                val refreshed = cloud.refreshAfterUnauthorized(cloudToken) ?: throw e
+                openEventStreamOnce(path, refreshed)
+            } else {
+                throw e
+            }
+        }
+    }
+
+    private fun openEventStreamOnce(path: String, bearer: String): HttpStream {
+        val headers = LinkedHashMap<String, String>()
+        headers["Accept"] = "text/event-stream"
+        headers["Cache-Control"] = "no-cache"
+        if (bearer.isNotBlank()) headers["Authorization"] = "Bearer $bearer"
+        accountId?.takeIf { it.isNotBlank() }?.let { headers["X-Flux-Account"] = it }
+        val stream = streamTransport.open(
+            HttpRequest(
+                method = "GET",
+                url = baseUrl + path,
+                headers = headers,
+                timeoutMs = STREAM_READ_TIMEOUT_MS,
+                connectTimeoutMs = 15_000,
+            ),
+        )
+        if (stream.code !in 200..299) {
+            val text = runCatching {
+                stream.body.bufferedReader().use { it.readText().take(4_096) }
+            }.getOrDefault("")
+            stream.close()
+            val root = runCatching { JSONObject(text) }.getOrNull()
+            val message = root?.optStringOrEmpty("message").orEmpty()
+                .ifBlank { "连接对话流失败（HTTP ${stream.code}）" }
+            throw ApiException(message, stream.code, root?.optStringOrEmpty("code").orEmpty())
+        }
+        return stream
+    }
 
     // ---------- 审批（任务决策） ----------
 
@@ -817,10 +894,13 @@ class Api internal constructor(
         instruction: String? = null,
         schedule: String? = null,
         enabled: Boolean = true,
+        notify: String = "origin",
     ): Unit = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("name", name)
             .put("enabled", enabled)
+            // 与网页一致：总把结果通知策略发上去，缺省是发回原处。
+            .put("notify", normalizeRoutineNotify(notify))
         if (!instruction.isNullOrBlank()) body.put("instruction", instruction)
         if (!schedule.isNullOrBlank()) body.put("schedule", schedule)
         request("POST", "/api/v1/bots/$botId/routines", body)
@@ -1065,6 +1145,7 @@ class Api internal constructor(
             time = schedule.ifBlank { o.optStringOrEmpty("next_run_at") },
             freq = schedule.ifBlank { "定时" },
             enabled = o.optBoolean("enabled", true),
+            notify = normalizeRoutineNotify(o.optStringOrEmpty("notify")),
         )
     }
 
@@ -1101,6 +1182,12 @@ class Api internal constructor(
     companion object {
         /** 未登录 / 未绑定账号时使用的全局令牌。 */
         private const val SYS_TOKEN_KEY = "sys.api_token"
+
+        /**
+         * 事件流的读超时：服务端会持续发 `: keep-alive`，正常不会触发。
+         * 不设成无限是为了让彻底死掉的连接在退避重连前能自己醒过来。
+         */
+        private const val STREAM_READ_TIMEOUT_MS = 120_000
 
         const val DEFAULT_BASE_URL = "https://flux.qiuli55.top/bot"
     }

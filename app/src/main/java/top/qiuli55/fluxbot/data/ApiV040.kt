@@ -33,6 +33,8 @@ suspend fun Api.updateRoutineDetail(
     clearSchedule: Boolean = false,
     enabled: Boolean? = null,
     eventTriggers: List<String>? = null,
+    /** origin / none；null 表示这次不改通知策略。 */
+    notify: String? = null,
 ): Unit = withContext(Dispatchers.IO) {
     val payload = JSONObject()
     if (name != null) payload.put("name", name)
@@ -41,6 +43,7 @@ suspend fun Api.updateRoutineDetail(
     else if (clearSchedule) payload.put("schedule", JSONObject.NULL)
     if (enabled != null) payload.put("enabled", enabled)
     if (eventTriggers != null) payload.put("event_triggers", JSONArray(eventTriggers))
+    if (notify != null) payload.put("notify", normalizeRoutineNotify(notify))
     request("PATCH", "/api/v1/bots/$botId/routines/$routineId", payload)
     Unit
 }

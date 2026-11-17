@@ -507,6 +507,8 @@ data class RemoteRoutineDetail(
     val nextRunAt: String,
     val lastRunAt: String,
     val createdAt: String,
+    /** 结果通知策略：origin = 发回原处（默认），none = 不发。 */
+    val notify: String = ROUTINE_NOTIFY_ORIGIN,
 )
 
 internal fun parseRoutineDetail(o: JSONObject): RemoteRoutineDetail? {
@@ -526,8 +528,23 @@ internal fun parseRoutineDetail(o: JSONObject): RemoteRoutineDetail? {
         nextRunAt = v040Time(o.optStringOrEmpty("next_run_at")),
         lastRunAt = v040Time(o.optStringOrEmpty("last_run_at")),
         createdAt = v040Time(o.optStringOrEmpty("created_at")),
+        notify = normalizeRoutineNotify(o.optStringOrEmpty("notify")),
     )
 }
+
+/** 结果通知：发回创建来源（默认）。 */
+const val ROUTINE_NOTIFY_ORIGIN = "origin"
+
+/** 结果通知：不发。 */
+const val ROUTINE_NOTIFY_NONE = "none"
+
+/** 旧载荷没有 notify 字段时按 origin 处理；未知值也归到 origin。 */
+fun normalizeRoutineNotify(raw: String): String =
+    if (raw.trim().lowercase() == ROUTINE_NOTIFY_NONE) ROUTINE_NOTIFY_NONE else ROUTINE_NOTIFY_ORIGIN
+
+/** 「结果通知：发回原处 / 不发」里展示的文案。 */
+fun routineNotifyLabel(notify: String): String =
+    if (normalizeRoutineNotify(notify) == ROUTINE_NOTIFY_NONE) "不发" else "发回原处"
 
 /** 例程触发摘要：cron 优先，其次事件，最后「手动」。 */
 fun routineTriggerSummary(routine: RemoteRoutineDetail): String {

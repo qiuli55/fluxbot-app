@@ -361,9 +361,11 @@ class Store(context: Context) {
         sender: String? = null,
         kind: String = "",
         payload: Map<String, String> = emptyMap(),
+        /** 指定 id 用于乐观消息 / 兜底回复，便于事件流到达时就地替换。 */
+        id: String = "",
     ): Message {
         val m = Message(
-            "m-${System.nanoTime()}", role, text, clock(), card, sender,
+            id.ifBlank { "m-${System.nanoTime()}" }, role, text, clock(), card, sender,
             kind = kind, payload = payload,
         )
         updateBot(botId) {
@@ -376,6 +378,67 @@ class Store(context: Context) {
             )
         }
         return m
+    }
+
+    /**
+     * 把事件流里的一条消息写进会话：同 id 就地更新。
+     *
+     * - 子任务卡按 subtask_id 归并（开始 / 运行 / 完成覆盖同一张卡）；
+     * - 服务端回显的用户消息替换本机乐观插入的那条（同内容、id 以 local- 开头）；
+     * - 保留本机写入的 `choice_*` 作答状态，事件里的 payload 不带这些字段。
+     */
+    fun upsertStreamMessage(botId: String, remote: RemoteMessage) {
+        if (remote.id.isBlank()) return
+        val incoming = remote.toAppMessage(clock())
+        updateBot(botId) { bot ->
+            val subtaskId = incoming.payload["subtask_id"].orEmpty()
+            val isSubtask = incoming.kind == "subtask" && subtaskId.isNotEmpty()
+            val messages = bot.messages.toMutableList()
+            var index = messages.indexOfFirst { existing ->
+                when {
+                    isSubtask -> existing.kind == "subtask" &&
+                        existing.payload["subtask_id"].orEmpty() == subtaskId
+                    remote.role == "user" -> existing.id == incoming.id ||
+                        (
+                            existing.id.startsWith("local-") &&
+                                existing.role == "user" &&
+                                existing.displayText().trim() == incoming.displayText().trim()
+                            )
+                    else -> existing.id == incoming.id
+                }
+            }
+            if (index >= 0) {
+                val kept = messages[index].payload.filterKeys { it.startsWith("choice_") }
+                messages[index] = incoming.copy(payload = kept + incoming.payload)
+            } else {
+                index = messages.size
+                messages.add(incoming)
+            }
+            if (isSubtask) {
+                // 同一子任务只保留一张卡：删掉除当前位置外的旧状态消息。
+                val duplicates = messages.indices.filter { i ->
+                    i != index && messages[i].kind == "subtask" &&
+                        messages[i].payload["subtask_id"].orEmpty() == subtaskId
+                }
+                if (duplicates.isNotEmpty()) {
+                    val removedBefore = duplicates.count { it < index }
+                    duplicates.sortedDescending().forEach { messages.removeAt(it) }
+                    index -= removedBefore
+                }
+            }
+            val last = messages.lastOrNull()
+            val isLast = last?.id == incoming.id
+            bot.copy(
+                messages = messages,
+                preview = if (isLast) {
+                    incoming.displayText().replace("\n", " ").take(46)
+                } else {
+                    bot.preview
+                },
+                time = if (isLast) incoming.time else bot.time,
+                unread = if (incoming.role != "user") "accent" else bot.unread,
+            )
+        }
     }
 
     /**

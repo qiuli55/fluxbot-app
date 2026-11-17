@@ -3,7 +3,9 @@ package top.qiuli55.fluxbot.data
 import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
+import java.io.Closeable
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.ProtocolException
@@ -60,6 +62,81 @@ class UrlConnectionHttpTransport : HttpTransport {
             return HttpResponse(code, text)
         } finally {
             conn.disconnect()
+        }
+    }
+}
+
+/**
+ * 一条已建立的长连接（SSE）。
+ *
+ * 与 [HttpResponse] 不同，body 不会被预先读完：调用方边读边解析。
+ * [close] 会断开底层连接，因此其它线程可以在阻塞读期间关闭它来取消订阅。
+ */
+class HttpStream(
+    val code: Int,
+    val headers: Map<String, String>,
+    val body: InputStream,
+    private val onClose: () -> Unit,
+) : Closeable {
+
+    @Volatile
+    private var closed = false
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        runCatching { body.close() }
+        runCatching { onClose() }
+    }
+}
+
+/**
+ * 流式传输的独立入口。
+ *
+ * 普通请求 / 响应仍走 [HttpTransport]；只有事件流需要「不读完、可中断」的读取。
+ */
+interface StreamingHttpTransport {
+    /** 打开长连接；非 2xx 也照常返回，由调用方读取错误体并抛出 [ApiException]。 */
+    fun open(request: HttpRequest): HttpStream
+}
+
+/**
+ * 生产实现：HttpURLConnection + 增量读取。
+ *
+ * readTimeout 由调用方给（0 表示一直等）。断开连接会让阻塞中的读立即抛
+ * IOException，所以取消订阅只需要在别的线程调用 [HttpStream.close]。
+ */
+class UrlConnectionStreamingHttpTransport : StreamingHttpTransport {
+
+    override fun open(request: HttpRequest): HttpStream {
+        val conn = URL(request.url).openConnection() as HttpURLConnection
+        var handedOver = false
+        try {
+            conn.requestMethod = request.method
+            conn.connectTimeout = request.connectTimeoutMs
+            conn.readTimeout = request.timeoutMs
+            conn.instanceFollowRedirects = false
+            request.headers.forEach { (name, value) -> conn.setRequestProperty(name, value) }
+            request.body?.let { payload ->
+                conn.doOutput = true
+                conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+            }
+            val code = conn.responseCode
+            val headers = LinkedHashMap<String, String>()
+            conn.headerFields.forEach { (name, values) ->
+                if (name != null) headers[name.lowercase()] = values.joinToString(",")
+            }
+            val input = if (code in 200..299) conn.inputStream else (conn.errorStream ?: conn.inputStream)
+            val stream = HttpStream(
+                code = code,
+                headers = headers,
+                body = BufferedInputStream(input),
+                onClose = { conn.disconnect() },
+            )
+            handedOver = true
+            return stream
+        } finally {
+            if (!handedOver) conn.disconnect()
         }
     }
 }
